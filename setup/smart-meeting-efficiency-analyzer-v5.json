@@ -1,0 +1,1113 @@
+{
+  "name": "Smart Meeting Efficiency Analyzer v5",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "sma-1",
+      "name": "Weekly Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        180
+      ],
+      "notes": "Runs every Monday at 8:00 AM to analyze the previous week's meetings."
+    },
+    {
+      "parameters": {},
+      "id": "sma-2",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        420
+      ],
+      "notes": "Click to run the analysis on-demand."
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "value": "primary",
+          "mode": "list",
+          "cachedResultName": "primary"
+        },
+        "returnAll": true,
+        "options": {
+          "singleEvents": true,
+          "timeMin": "={{ $json.from }}",
+          "timeMax": "={{ $json.to }}",
+          "orderBy": "startTime"
+        }
+      },
+      "id": "sma-4",
+      "name": "Google Calendar \u2013 Get Events",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.2,
+      "position": [
+        560,
+        300
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "YOUR_GOOGLE_CALENDAR_CREDENTIAL_ID",
+          "name": "Google Calendar OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const tw = $('Resolve Inputs & Defaults').first().json;\nconst events = [];\nconst minDuration = tw.minDuration || 0;\nconst typeFilter = tw.typeFilter || null;\n\nfor (const item of items) {\n  const e = item.json;\n  if (!e.start?.dateTime || !e.end?.dateTime) continue;\n\n  const attendees = e.attendees || [];\n  if (attendees.length < 2) continue;\n\n  const startMs = new Date(e.start.dateTime).getTime();\n  const endMs = new Date(e.end.dateTime).getTime();\n  const durMin = (endMs - startMs) / 60000;\n  if (durMin <= 0) continue;\n  if (durMin < minDuration) continue;\n\n  const title = (e.summary || '').toLowerCase();\n  let type = 'general';\n  if (attendees.length === 2) type = '1:1';\n  else if (/standup|stand-up|daily.?scrum|daily.?sync/.test(title)) type = 'standup';\n  else if (/all.?hands|town.?hall|company.?meeting/.test(title)) type = 'all-hands';\n  else if (/retro|retrospective/.test(title)) type = 'retrospective';\n  else if (/sprint.?plan|backlog|planning/.test(title)) type = 'planning';\n  else if (/review|demo|showcase/.test(title)) type = 'review';\n  else if (/interview|screening/.test(title)) type = 'interview';\n  else if (/workshop|training|learning/.test(title)) type = 'workshop';\n  else if (/brainstorm/.test(title)) type = 'brainstorm';\n  else if (/sync|catch.?up|check.?in/.test(title)) type = 'sync';\n\n  if (typeFilter && type !== typeFilter) continue;\n\n  events.push({\n    json: {\n      meetingId: e.id,\n      summary: e.summary || 'Untitled',\n      start: e.start.dateTime,\n      end: e.end.dateTime,\n      durationMinutes: +durMin.toFixed(1),\n      attendees: attendees.map(a => ({\n        email: a.email,\n        name: a.displayName || a.email.split('@')[0],\n        status: a.responseStatus || 'unknown',\n        isOrganizer: !!a.organizer\n      })),\n      attendeeCount: attendees.length,\n      attendeeEmails: attendees.map(a => a.email).join(', '),\n      meetingType: type,\n      isRecurring: !!e.recurringEventId,\n      meetingLink: e.hangoutLink || e.location || null,\n      organizer: e.organizer?.email || null,\n      totalWorkingMinutes: tw.totalWorkingMinutes\n    }\n  });\n}\n\nevents.sort((a, b) => new Date(a.json.start) - new Date(b.json.start));\n\nfor (let i = 0; i < events.length; i++) {\n  if (i === 0) { events[i].json.isBackToBack = false; continue; }\n  const prevEnd = new Date(events[i-1].json.end).getTime();\n  const currStart = new Date(events[i].json.start).getTime();\n  events[i].json.isBackToBack = (currStart - prevEnd) < 900000;\n}\n\nif (events.length === 0) {\n  return [{ json: { _noMeetings: true, weekLabel: tw.weekLabel || tw.rangeLabel } }];\n}\n\nreturn events;"
+      },
+      "id": "sma-5",
+      "name": "Filter & Classify Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        300
+      ]
+    },
+    {
+      "_comment": "FATHOM API v3 FIX: Real endpoint is https://api.fathom.ai/external/v1/meetings, auth is X-Api-Key header (NOT Bearer token). Filter by created_after/created_before with include_transcript=true. Returns items[] with transcript[] array of {speaker, text, timestamp}.",
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.fathom.ai/external/v1/meetings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "include_transcript",
+              "value": "true"
+            },
+            {
+              "name": "include_summary",
+              "value": "true"
+            },
+            {
+              "name": "created_after",
+              "value": "={{ $json.start }}"
+            },
+            {
+              "name": "created_before",
+              "value": "={{ $json.end }}"
+            },
+            {
+              "name": "limit",
+              "value": "10"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "sma-6",
+      "name": "Fathom \u2013 Fetch Meetings & Transcripts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_FATHOM_CREDENTIAL_ID",
+          "name": "Fathom API Key"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "FIXED v3: Uses real Fathom API (api.fathom.ai/external/v1/meetings). Auth = X-Api-Key header. include_transcript=true & include_summary=true returns full transcript[] and default_summary inline. created_after/before filter to the Calendar event's time window. Rate limit: 60 req/min."
+    },
+    {
+      "parameters": {
+        "jsCode": "// FIXED v3: Real Fathom response shape:\n// { items: [ { title, meeting_title, scheduled_start_time, scheduled_end_time,\n//              transcript: [{speaker:{display_name, matched_calendar_invitee_email}, text, timestamp}],\n//              default_summary: {markdown_formatted},\n//              action_items: [{description, assignee:{name,email}, completed, recording_timestamp}],\n//              calendar_invitees: [{name, email, is_external}],\n//              recorded_by: {name, email} } ], next_cursor }\n\nconst meetings = $('Filter & Classify Events').all();\n\nreturn items.map((item, i) => {\n  const meeting = meetings[i]?.json || {};\n  if (meeting._noMeetings) return { json: { _noMeetings: true } };\n\n  const resp = item.json;\n  const fathomItems = resp?.items || [];\n\n  // Match Fathom recording to Calendar event by time proximity (within 30 min)\n  const calStart = new Date(meeting.start).getTime();\n  let bestMatch = null;\n  let bestDiff = Infinity;\n\n  for (const fi of fathomItems) {\n    const fStart = new Date(fi.scheduled_start_time || fi.recording_start_time || 0).getTime();\n    const diff = Math.abs(fStart - calStart);\n    if (diff < bestDiff && diff < 1800000) { // within 30 minutes\n      bestDiff = diff;\n      bestMatch = fi;\n    }\n  }\n\n  // Extract structured transcript text for AI prompt\n  let transcriptText = null;\n  let speakerSegments = [];\n  let fathomActionItems = [];\n  let fathomSummary = null;\n\n  if (bestMatch) {\n    // Build readable transcript from speaker-labeled segments\n    if (Array.isArray(bestMatch.transcript) && bestMatch.transcript.length > 0) {\n      transcriptText = bestMatch.transcript\n        .map(seg => `[${seg.timestamp}] ${seg.speaker?.display_name || 'Unknown'}: ${seg.text}`)\n        .join('\\n');\n      // Build per-speaker stats from transcript\n      const speakerMap = {};\n      for (const seg of bestMatch.transcript) {\n        const name = seg.speaker?.display_name || 'Unknown';\n        const email = seg.speaker?.matched_calendar_invitee_email || null;\n        if (!speakerMap[name]) speakerMap[name] = { name, email, segments: 0, wordCount: 0 };\n        speakerMap[name].segments++;\n        speakerMap[name].wordCount += (seg.text || '').split(' ').length;\n      }\n      speakerSegments = Object.values(speakerMap);\n    }\n    if (bestMatch.default_summary?.markdown_formatted) {\n      fathomSummary = bestMatch.default_summary.markdown_formatted;\n    }\n    if (Array.isArray(bestMatch.action_items)) {\n      fathomActionItems = bestMatch.action_items.map(ai => ({\n        description: ai.description,\n        assignee: ai.assignee?.name || ai.assignee?.email || null,\n        completed: ai.completed || false,\n        timestamp: ai.recording_timestamp || null\n      }));\n    }\n  }\n\n  return {\n    json: {\n      ...meeting,\n      transcript: transcriptText,\n      speakerSegments: speakerSegments,\n      fathomSummary: fathomSummary,\n      fathomActionItems: fathomActionItems,\n      fathomCallId: bestMatch?.url || null,\n      hasTranscript: !!transcriptText,\n      transcriptSegmentCount: bestMatch?.transcript?.length || 0\n    }\n  };\n});"
+      },
+      "id": "sma-7",
+      "name": "Match & Extract Fathom Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        300
+      ],
+      "notes": "FIXED v3: Matches Fathom recordings to Calendar events by timestamp proximity (\u00b130 min). Builds readable transcript text from speaker-labeled segments. Extracts per-speaker word counts, Fathom's own action items, and AI summary for enriched prompting."
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\n\nfor (const item of items) {\n  const m = item.json;\n  if (m._noMeetings) { results.push({ json: m }); continue; }\n\n  let transcriptBlock;\n  if (m.hasTranscript && m.transcript) {\n    transcriptBlock = 'FULL TRANSCRIPT (' + m.transcriptSegmentCount + ' segments):\\n' + m.transcript;\n    if (m.fathomSummary) {\n      transcriptBlock += '\\n\\nFATHOM AI SUMMARY:\\n' + m.fathomSummary;\n    }\n    if (m.speakerSegments && m.speakerSegments.length > 0) {\n      transcriptBlock += '\\n\\nSPEAKER WORD COUNTS (for reference):\\n' +\n        m.speakerSegments.map(s => `  ${s.name}: ${s.wordCount} words across ${s.segments} segments`).join('\\n');\n    }\n    if (m.fathomActionItems && m.fathomActionItems.length > 0) {\n      transcriptBlock += '\\n\\nFATHOM-DETECTED ACTION ITEMS:\\n' +\n        m.fathomActionItems.map(ai => `  - ${ai.description}` + (ai.assignee ? ` (\u2192 ${ai.assignee})` : '')).join('\\n');\n    }\n  } else {\n    transcriptBlock = 'No transcript available. Estimate scores based on the meeting metadata. Use reasonable defaults for a meeting of this type, duration, and attendee count.';\n  }\n\n  const schema = [\n    '{',\n    '  \"decisionMinutes\": <float>,',\n    '  \"discussionMinutes\": <float>,',\n    '  \"effectiveMinutes\": <float>,',\n    '  \"idleMinutes\": <float>,',\n    '  \"meetingNecessityScore\": <int 0-100>,',\n    '  \"meetingNecessityReason\": \"<brief justification>\",',\n    '  \"sentiment\": \"<positive|neutral|negative|mixed>\",',\n    '  \"keyDecisions\": [\"<decision>\"],',\n    '  \"actionItems\": [{\"task\":\"<what>\",\"owner\":\"<who or null>\",\"deadline\":\"<when or null>\"}],',\n    '  \"unresolvedItems\": [\"<topic not resolved>\"],',\n    '  \"participants\": [{',\n    '    \"name\": \"<name or email>\",',\n    '    \"email\": \"<matched email if available>\",',\n    '    \"role\": \"<facilitator|contributor|observer|dominator>\",',\n    '    \"speakingTimeMinutes\": <float>,',\n    '    \"decisionContributions\": <int>,',\n    '    \"discussionContributions\": <int>,',\n    '    \"contributionScore\": <int 0-100>,',\n    '    \"feedback\": \"<one sentence constructive feedback>\"',\n    '  }],',\n    '  \"improvementSuggestions\": [\"<actionable suggestion>\"],',\n    '  \"qualitySummary\": \"<2-3 sentence assessment>\"',\n    '}'\n  ].join('\\n');\n\n  const prompt =\n    'Analyze this meeting and return a JSON object with EXACTLY this structure (no markdown, no extra text):\\n' + schema + '\\n\\n' +\n    'SCORING RULES:\\n' +\n    '- meetingNecessityScore: 100=must be live discussion, 0=total waste/should be email\\n' +\n    '- contributionScore: Quality over quantity. Decisive/concise > rambling. Accounts for role.\\n' +\n    '- effectiveMinutes: Decisions + action planning + focused problem-solving. Must be <= total duration.\\n' +\n    '- idleMinutes: Small talk, waiting, repetition, tangents. effective + idle \u2248 total.\\n' +\n    '- role: facilitator=ran the meeting, contributor=actively participated, observer=mostly silent, dominator=talked too much relative to value\\n' +\n    '- Use speaker word counts and Fathom action items (if provided) to inform your estimates.\\n\\n' +\n    'MEETING DATA:\\n' +\n    'Title: ' + m.summary + '\\n' +\n    'Type: ' + m.meetingType + '\\n' +\n    'Duration: ' + m.durationMinutes + ' minutes\\n' +\n    'Attendees (' + m.attendeeCount + '): ' + m.attendeeEmails + '\\n' +\n    'Recurring: ' + (m.isRecurring ? 'Yes' : 'No') + '\\n' +\n    'Back-to-back: ' + (m.isBackToBack ? 'Yes' : 'No') + '\\n\\n' +\n    transcriptBlock;\n\n  results.push({ json: { ...m, _prompt: prompt } });\n}\n\nreturn results;"
+      },
+      "id": "sma-8",
+      "name": "Prepare AI Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        300
+      ],
+      "notes": "IMPROVED v3: Prompt now includes Fathom's speaker word counts and pre-detected action items to improve AI accuracy. Passes fathomSummary as additional context. Schema unchanged for DB compatibility."
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are an expert meeting efficiency analyst. Analyze the provided meeting data and return ONLY a valid JSON object matching the exact schema requested. No markdown. No preamble. No backticks. Pure JSON only. Be precise with time estimates in minutes. All scores are 0-100 integers.",
+              "role": "system"
+            },
+            {
+              "content": "={{ $json._prompt }}",
+              "role": "user"
+            }
+          ]
+        },
+        "simplifyOutput": true,
+        "jsonOutput": true,
+        "options": {
+          "temperature": 0.1,
+          "maxTokens": 2000
+        }
+      },
+      "id": "sma-9",
+      "name": "OpenAI \u2013 Analyze Meeting",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        1960,
+        300
+      ],
+      "continueOnFail": true,
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI API"
+        }
+      },
+      "notes": "Uses GPT-4.1 with JSON mode. maxTokens increased to 2000 to handle large participant arrays. temperature=0.1 for consistent scoring."
+    },
+    {
+      "parameters": {
+        "jsCode": "// FIXED v3: More robust AI response parsing. Handles OpenAI JSON mode quirks.\nconst merged = $('Match & Extract Fathom Data').all();\nconst results = [];\nlet physicalMeetings = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const aiResp = items[i].json;\n  const meeting = merged[i]?.json || {};\n\n  if (meeting._noMeetings) continue;\n\n  // Physical meeting (no Fathom transcript) \u2014 count but don't score\n  if (!meeting.hasTranscript) {\n    physicalMeetings.push({\n      summary: meeting.summary || 'Untitled',\n      start: meeting.start,\n      duration: Math.round(((new Date(meeting.end) - new Date(meeting.start)) / 60000) || 0),\n      type: meeting.meetingType || 'general',\n      attendees: meeting.attendeeCount || 0\n    });\n    continue;\n  }\n\n  let analysis = {};\n  try {\n    // jsonOutput=true means content may already be parsed object\n    let raw = aiResp;\n    if (typeof raw === 'string') {\n      raw = raw.replace(/```json|```/g, '').trim();\n      analysis = JSON.parse(raw);\n    } else if (raw?.content) {\n      const c = raw.content;\n      analysis = typeof c === 'object' ? c : JSON.parse(String(c).replace(/```json|```/g, '').trim());\n    } else if (raw?.message?.content) {\n      const c = raw.message.content;\n      analysis = typeof c === 'object' ? c : JSON.parse(String(c).replace(/```json|```/g, '').trim());\n    } else if (raw?.choices?.[0]?.message?.content) {\n      const c = raw.choices[0].message.content;\n      analysis = typeof c === 'object' ? c : JSON.parse(String(c).replace(/```json|```/g, '').trim());\n    } else if (typeof raw === 'object' && raw.decisionMinutes !== undefined) {\n      // Already parsed JSON object\n      analysis = raw;\n    }\n  } catch (e) {\n    analysis = { _parseError: e.message };\n  }\n\n  const totalMin = meeting.durationMinutes || 0;\n  const decMin = parseFloat(analysis.decisionMinutes) || 0;\n  const discMin = parseFloat(analysis.discussionMinutes) || 0;\n  const effMin = Math.min(parseFloat(analysis.effectiveMinutes) || 0, totalMin);\n  const idleMin = parseFloat(analysis.idleMinutes) || 0;\n  const necessityScore = analysis.meetingNecessityScore ?? 50;\n  const actionItems = analysis.actionItems || [];\n  const decisions = analysis.keyDecisions || [];\n\n  // Merge Fathom-detected action items with AI-detected (deduplicate by description)\n  const fathomAI = meeting.fathomActionItems || [];\n  const allActionItems = [...actionItems];\n  for (const fai of fathomAI) {\n    const exists = allActionItems.some(ai =>\n      (ai.task || '').toLowerCase().includes((fai.description || '').toLowerCase().substring(0, 20))\n    );\n    if (!exists) allActionItems.push({ task: fai.description, owner: fai.assignee, deadline: null, source: 'fathom' });\n  }\n\n  const decDiscRatio = (decMin + discMin) > 0\n    ? +((decMin / (decMin + discMin)) * 100).toFixed(1) : 0;\n\n  const effPercent = totalMin > 0\n    ? +((effMin / totalMin) * 100).toFixed(1) : 0;\n\n  const actionBonus = Math.min(allActionItems.length * 10, 100);\n  const decisionBonus = Math.min(decisions.length * 15, 100);\n\n  const meetingScore = +(\n    effPercent * 0.30 +\n    decDiscRatio * 0.20 +\n    necessityScore * 0.25 +\n    actionBonus * 0.15 +\n    decisionBonus * 0.10\n  ).toFixed(1);\n\n  results.push({\n    json: {\n      meetingId: meeting.meetingId,\n      summary: meeting.summary,\n      start: meeting.start,\n      end: meeting.end,\n      durationMinutes: totalMin,\n      meetingType: meeting.meetingType,\n      isRecurring: meeting.isRecurring,\n      isBackToBack: meeting.isBackToBack,\n      attendeeCount: meeting.attendeeCount,\n      attendeeEmails: meeting.attendeeEmails,\n      hasTranscript: meeting.hasTranscript,\n      fathomCallId: meeting.fathomCallId,\n      decisionMinutes: decMin,\n      discussionMinutes: discMin,\n      effectiveMinutes: effMin,\n      idleMinutes: idleMin,\n      decisionDiscussionRatio: decDiscRatio,\n      effectiveTimePercent: effPercent,\n      meetingScore: meetingScore,\n      meetingNecessityScore: necessityScore,\n      meetingNecessityReason: analysis.meetingNecessityReason || '',\n      sentiment: analysis.sentiment || 'neutral',\n      keyDecisions: decisions,\n      actionItems: allActionItems,\n      unresolvedItems: analysis.unresolvedItems || [],\n      improvementSuggestions: analysis.improvementSuggestions || [],\n      qualitySummary: analysis.qualitySummary || '',\n      participants: (analysis.participants || []).map(p => ({\n        name: p.name,\n        email: p.email || null,\n        role: p.role || 'contributor',\n        speakingTimeMinutes: p.speakingTimeMinutes || 0,\n        decisionContributions: p.decisionContributions || 0,\n        discussionContributions: p.discussionContributions || 0,\n        contributionScore: p.contributionScore || 0,\n        feedback: p.feedback || '',\n        meetingId: meeting.meetingId,\n        meetingDate: meeting.start\n      }))\n    }\n  });\n}\n\n// Inject physical/virtual counts into every output item\nconst virtualCount = results.length;\nconst physicalCount = physicalMeetings.length;\nfor (const r of results) {\n  r.json.physicalCount = physicalCount;\n  r.json.virtualCount = virtualCount;\n  r.json.physicalMeetings = physicalMeetings;\n}\n\nreturn results.length > 0 ? results : [{ json: { _empty: true, physicalCount, virtualCount, physicalMeetings } }];"
+      },
+      "id": "sma-10",
+      "name": "Compute Scores & Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        300
+      ],
+      "notes": "FIXED v3: Robust JSON parsing handles all OpenAI output formats. IMPROVED: Merges Fathom-detected action items with AI-detected action items (deduplicating by description). Participant email now stored for better leaderboard identity resolution."
+    },
+    {
+      "parameters": {
+        "jsCode": "function esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  if (typeof val === 'boolean') return val ? 'true' : 'false';\n  if (typeof val === 'number') return String(val);\n  if (Array.isArray(val) || typeof val === 'object') return \"'\" + JSON.stringify(val).replace(/'/g, \"''\") + \"'::jsonb\";\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nconst results = [];\nfor (const item of items) {\n  const d = item.json;\n  if (d._empty) { results.push({ json: { _sql: 'SELECT 1', ...d } }); continue; }\n  const sql = `INSERT INTO meeting_metrics (meeting_id, summary, start_time, end_time, duration_minutes, meeting_type, is_recurring, is_back_to_back, attendee_count, has_transcript, fathom_call_id, decision_minutes, discussion_minutes, effective_minutes, idle_minutes, decision_discussion_ratio, effective_time_percent, meeting_score, meeting_necessity_score, meeting_necessity_reason, sentiment, key_decisions, action_items, unresolved_items, improvement_suggestions, quality_summary) VALUES (${esc(d.meetingId)}, ${esc(d.summary)}, ${esc(d.start)}, ${esc(d.end)}, ${esc(d.durationMinutes)}, ${esc(d.meetingType)}, ${esc(d.isRecurring)}, ${esc(d.isBackToBack)}, ${esc(d.attendeeCount)}, ${esc(d.hasTranscript)}, ${esc(d.fathomCallId)}, ${esc(d.decisionMinutes)}, ${esc(d.discussionMinutes)}, ${esc(d.effectiveMinutes)}, ${esc(d.idleMinutes)}, ${esc(d.decisionDiscussionRatio)}, ${esc(d.effectiveTimePercent)}, ${esc(d.meetingScore)}, ${esc(d.meetingNecessityScore)}, ${esc(d.meetingNecessityReason)}, ${esc(d.sentiment)}, ${esc(d.keyDecisions)}, ${esc(d.actionItems)}, ${esc(d.unresolvedItems)}, ${esc(d.improvementSuggestions)}, ${esc(d.qualitySummary)}) ON CONFLICT (meeting_id) DO UPDATE SET created_at = NOW()`;\n  results.push({ json: { _sql: sql, ...d } });\n}\nreturn results;"
+      },
+      "id": "sma-10b",
+      "name": "Build Meeting Insert SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2380,
+        300
+      ],
+      "notes": "Builds raw INSERT SQL with proper escaping for JSONB columns. Bypasses n8n Postgres node's defineBelow JSONB limitation."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json._sql }}"
+      },
+      "id": "sma-11",
+      "name": "Postgres \u2013 Upsert Meeting Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2560,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres DB"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "FIXED v5: Uses executeQuery with raw SQL to bypass n8n defineBelow JSONB array limitation. SQL built by upstream Code node with proper escaping."
+    },
+    {
+      "parameters": {
+        "jsCode": "function esc(val) {\n  if (val === null || val === undefined) return 'NULL';\n  if (typeof val === 'boolean') return val ? 'true' : 'false';\n  if (typeof val === 'number') return String(val);\n  return \"'\" + String(val).replace(/'/g, \"''\") + \"'\";\n}\n\nconst metrics = $('Compute Scores & Metrics').all();\nconst results = [];\n\nfor (const m of metrics) {\n  if (m.json._empty) continue;\n  for (const p of (m.json.participants || [])) {\n    const data = {\n      meeting_id: p.meetingId,\n      meeting_date: p.meetingDate,\n      participant_name: p.name,\n      participant_email: p.email,\n      role: p.role,\n      speaking_time_minutes: p.speakingTimeMinutes,\n      decision_contributions: p.decisionContributions,\n      discussion_contributions: p.discussionContributions,\n      contribution_score: p.contributionScore,\n      feedback: p.feedback\n    };\n    const sql = `INSERT INTO participant_metrics (meeting_id, meeting_date, participant_name, participant_email, role, speaking_time_minutes, decision_contributions, discussion_contributions, contribution_score, feedback) VALUES (${esc(data.meeting_id)}, ${esc(data.meeting_date)}, ${esc(data.participant_name)}, ${esc(data.participant_email)}, ${esc(data.role)}, ${esc(data.speaking_time_minutes)}, ${esc(data.decision_contributions)}, ${esc(data.discussion_contributions)}, ${esc(data.contribution_score)}, ${esc(data.feedback)}) ON CONFLICT (meeting_id, participant_name) DO UPDATE SET created_at = NOW()`;\n    results.push({ json: { ...data, _sql: sql } });\n  }\n}\n\nreturn results.length > 0 ? results : [{ json: { _skip: true, _sql: 'SELECT 1' } }];"
+      },
+      "id": "sma-12",
+      "name": "Explode Participants",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        300
+      ],
+      "notes": "ADDED v3: participant_email now stored for identity resolution across meetings."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json._sql }}"
+      },
+      "id": "sma-13",
+      "name": "Postgres \u2013 Upsert Participant Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3080,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres DB"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "FIXED v5: Uses executeQuery with raw SQL. ON CONFLICT (meeting_id, participant_name) DO NOTHING handles re-runs. SQL built by upstream Explode Participants node."
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { ready: true } }];"
+      },
+      "id": "sma-14",
+      "name": "Aggregate Trigger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        300
+      ],
+      "notes": "Reduces N items to a single trigger so downstream query nodes execute exactly once."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT meeting_id, summary, start_time, end_time, duration_minutes, meeting_type, is_recurring, is_back_to_back, attendee_count, has_transcript, fathom_call_id, decision_minutes, discussion_minutes, effective_minutes, idle_minutes, decision_discussion_ratio, effective_time_percent, meeting_score, meeting_necessity_score, meeting_necessity_reason, sentiment, key_decisions, action_items, unresolved_items, improvement_suggestions, quality_summary FROM meeting_metrics WHERE start_time >= '{{ $('Resolve Inputs & Defaults').first().json.from }}' AND start_time <= '{{ $('Resolve Inputs & Defaults').first().json.to }}' ORDER BY meeting_score DESC"
+      },
+      "id": "sma-15",
+      "name": "Query Weekly Summary",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3640,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres DB"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT COUNT(*) as prev_count, COALESCE(ROUND(AVG(meeting_score)::numeric, 1), 0) as prev_avg_score, COALESCE(ROUND(AVG(effective_time_percent)::numeric, 1), 0) as prev_avg_effective, COALESCE(ROUND(SUM(duration_minutes)::numeric, 1), 0) as prev_total_minutes, COALESCE(ROUND(AVG(decision_discussion_ratio)::numeric, 1), 0) as prev_avg_ddr, COALESCE(ROUND(AVG(meeting_necessity_score)::numeric, 1), 0) as prev_avg_necessity FROM meeting_metrics WHERE start_time >= '{{ $('Resolve Inputs & Defaults').first().json.prevFrom }}' AND start_time < '{{ $('Resolve Inputs & Defaults').first().json.prevTo }}'"
+      },
+      "id": "sma-16",
+      "name": "Query Previous Week",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3920,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres DB"
+        }
+      },
+      "continueOnFail": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT COALESCE(participant_email, participant_name) as identity, participant_name, COUNT(DISTINCT meeting_id) as meetings_attended, ROUND(AVG(contribution_score)::numeric, 1) as avg_score, ROUND(SUM(speaking_time_minutes)::numeric, 1) as total_speaking, SUM(decision_contributions) as total_decisions, SUM(discussion_contributions) as total_discussions, MODE() WITHIN GROUP (ORDER BY role) as most_common_role FROM participant_metrics WHERE meeting_date >= '{{ $('Resolve Inputs & Defaults').first().json.from }}' AND meeting_date <= '{{ $('Resolve Inputs & Defaults').first().json.to }}' GROUP BY COALESCE(participant_email, participant_name), participant_name ORDER BY avg_score DESC"
+      },
+      "id": "sma-17",
+      "name": "Query Participant Leaderboard",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4200,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres DB"
+        }
+      },
+      "continueOnFail": true,
+      "alwaysOutputData": true,
+      "notes": "FIXED v3: Groups by email OR name to deduplicate same person with different name spellings. Shows most_common_role column."
+    },
+    {
+      "parameters": {
+        "jsCode": "const meetings = $('Query Weekly Summary').all().map(i => i.json);\nconst prevRaw = $('Query Previous Week').first()?.json || {};\nconst participants = $('Query Participant Leaderboard').all().map(i => i.json);\nlet tw = {};\ntry { tw = $('Resolve Inputs & Defaults').first().json; } catch(e) { tw = { weekLabel: 'Latest Week', totalWorkingMinutes: 2400 }; }\nlet rawEvents = [];\ntry { rawEvents = $('Filter & Classify Events').all().map(i => i.json).filter(e => !e._noMeetings); } catch(e) { rawEvents = []; }\n\nconst count = meetings.length;\nlet physicalCount = 0;\nlet virtualCount = count;\ntry {\n  const csFirst = $('Compute Scores & Metrics').first()?.json || {};\n  physicalCount = csFirst.physicalCount || 0;\n  virtualCount = csFirst.virtualCount || count;\n} catch(e) {}\nconst totalMeetingsAll = count + physicalCount;\nconst totalMin = meetings.reduce((s, m) => s + (parseFloat(m.duration_minutes) || 0), 0);\nconst totalHrs = (totalMin / 60).toFixed(1);\nconst avgScore = count > 0 ? (meetings.reduce((s, m) => s + (parseFloat(m.meeting_score) || 0), 0) / count).toFixed(1) : '0';\nconst avgEff = count > 0 ? (meetings.reduce((s, m) => s + (parseFloat(m.effective_time_percent) || 0), 0) / count).toFixed(1) : '0';\nconst avgDDR = count > 0 ? (meetings.reduce((s, m) => s + (parseFloat(m.decision_discussion_ratio) || 0), 0) / count).toFixed(1) : '0';\nconst avgNecessity = count > 0 ? (meetings.reduce((s, m) => s + (parseFloat(m.meeting_necessity_score) || 0), 0) / count).toFixed(1) : '0';\nconst density = ((totalMin / (tw.totalWorkingMinutes || 2400)) * 100).toFixed(1);\nconst b2bCount = rawEvents.filter(m => m.isBackToBack).length;\nconst recurringCount = meetings.filter(m => m.is_recurring).length;\nconst transcriptRate = count > 0 ? ((meetings.filter(m => m.has_transcript).length / count) * 100).toFixed(0) : '0';\nconst withFathom = meetings.filter(m => m.fathom_call_id).length;\n\nconst prevCount = parseInt(prevRaw.prev_count) || 0;\nconst prevAvgScore = parseFloat(prevRaw.prev_avg_score) || 0;\nconst prevAvgEff = parseFloat(prevRaw.prev_avg_effective) || 0;\nconst prevTotalMin = parseFloat(prevRaw.prev_total_minutes) || 0;\n\nconst trend = (curr, prev, dec) => {\n  if (prev === 0) return '';\n  const d = curr - prev;\n  if (Math.abs(d) < 0.5) return ' <span style=\"color:#888\">(steady)</span>';\n  const color = d > 0 ? '#00C48C' : '#FF3B5C';\n  const arrow = d > 0 ? '\u2191' : '\u2193';\n  return ' <span style=\"color:' + color + ';font-weight:600\">' + arrow + Math.abs(d).toFixed(dec || 1) + '</span>';\n};\n\nconst badge = (val, max, thresholds) => {\n  const v = parseFloat(val) || 0;\n  let color = '#FF3B5C';\n  if (v >= thresholds[1]) color = '#00C48C';\n  else if (v >= thresholds[0]) color = '#FFB800';\n  return '<span style=\"background:' + color + ';color:#fff;padding:2px 8px;border-radius:10px;font-size:13px;font-weight:600\">' + v.toFixed(1) + (max ? '/' + max : '%') + '</span>';\n};\n\nconst sorted = [...meetings].sort((a, b) => (parseFloat(b.meeting_score) || 0) - (parseFloat(a.meeting_score) || 0));\nconst top3 = sorted.slice(0, 3);\nconst bottom3 = count > 3 ? sorted.slice(-3).reverse() : [];\nconst couldBeEmail = meetings.filter(m => (parseFloat(m.meeting_necessity_score) || 100) < 40);\n\nconst byType = {};\nfor (const m of meetings) {\n  const t = m.meeting_type || 'general';\n  if (!byType[t]) byType[t] = { count: 0, totalScore: 0, totalMin: 0 };\n  byType[t].count++;\n  byType[t].totalScore += parseFloat(m.meeting_score) || 0;\n  byType[t].totalMin += parseFloat(m.duration_minutes) || 0;\n}\n\nlet h = '<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body style=\"margin:0;padding:0;background:#f4f6f9;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif\">';\nh += '<div style=\"max-width:680px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08)\">';\nh += '<div style=\"background:linear-gradient(135deg,#1E1E2E 50%,#FF6600);padding:28px 32px;color:#fff\">';\nh += '<h1 style=\"margin:0 0 4px 0;font-size:22px\">\ud83d\udcca Weekly Meeting Efficiency Report</h1>';\nh += '<p style=\"margin:0;opacity:0.85;font-size:14px\">\ud83d\udcc5 ' + tw.weekLabel + ' \u00b7 ' + count + ' virtual (analyzed) + ' + physicalCount + ' physical meetings</p>';\nh += '</div>';\n\nh += '<div style=\"display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid #eee\">';\nconst statBox = (icon, label, value, sub) => '<div style=\"flex:1;min-width:140px;padding:18px 20px;text-align:center;border-right:1px solid #eee\"><div style=\"font-size:22px\">' + icon + '</div><div style=\"font-size:22px;font-weight:700;color:#1a1a2e\">' + value + '</div><div style=\"font-size:12px;color:#888;margin-top:2px\">' + label + '</div>' + (sub ? '<div style=\"font-size:11px;color:#aaa;margin-top:2px\">' + sub + '</div>' : '') + '</div>';\nh += statBox('\ud83d\udcc5', 'Meetings', count, trend(count, prevCount, 0));\nh += statBox('\u23f1', 'Hours', totalHrs + 'h', density + '% density' + trend(totalMin/60, prevTotalMin/60, 1));\nh += statBox('\ud83c\udfaf', 'Avg Score', avgScore + '/100', trend(parseFloat(avgScore), prevAvgScore, 1));\nh += statBox('\u26a1', 'Effective', avgEff + '%', trend(parseFloat(avgEff), prevAvgEff, 1));\nh += '</div>';\n\nh += '<div style=\"display:flex;gap:0;border-bottom:1px solid #eee\">';\nh += '<div style=\"flex:1;padding:12px 20px;text-align:center;border-right:1px solid #eee\"><span style=\"font-size:16px;font-weight:700;color:#00C48C\">' + count + '</span> <span style=\"font-size:12px;color:#888\">Virtual (Analyzed)</span></div>';\nh += '<div style=\"flex:1;padding:12px 20px;text-align:center;border-right:1px solid #eee\"><span style=\"font-size:16px;font-weight:700;color:#FF6600\">' + physicalCount + '</span> <span style=\"font-size:12px;color:#888\">Physical (In-person)</span></div>';\nh += '<div style=\"flex:1;padding:12px 20px;text-align:center\"><span style=\"font-size:16px;font-weight:700;color:#1a1a2e\">' + (count + physicalCount) + '</span> <span style=\"font-size:12px;color:#888\">Total Meetings</span></div>';\nh += '</div>';\n\nif (b2bCount > 0 || parseFloat(density) > 40) {\n  h += '<div style=\"background:#FFF9E6;padding:10px 20px;font-size:13px;color:#7A5500;border-left:4px solid #FFB800;border-bottom:1px solid #eee\">\u26a0\ufe0f ';\n  const warnings = [];\n  if (b2bCount > 0) warnings.push(b2bCount + ' back-to-back meeting' + (b2bCount > 1 ? 's' : '') + ' detected');\n  if (parseFloat(density) > 40) warnings.push('Calendar density above 40% \u2014 risk of meeting fatigue');\n  h += warnings.join(' \u2022 ') + '</div>';\n}\n\nh += '<div style=\"padding:24px 28px\">';\n\nh += '<div style=\"display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px\">';\nh += '<div style=\"flex:1;min-width:200px;background:#f8f9fa;padding:14px 18px;border-radius:8px;border-left:4px solid #FF6600\"><div style=\"font-size:12px;color:#888;text-transform:uppercase;letter-spacing:0.5px\">Decision Ratio</div><div style=\"font-size:20px;font-weight:700;color:#1a1a2e\">' + avgDDR + '%</div></div>';\nh += '<div style=\"flex:1;min-width:200px;background:#f8f9fa;padding:14px 18px;border-radius:8px;border-left:4px solid #FF7A1A\"><div style=\"font-size:12px;color:#888;text-transform:uppercase;letter-spacing:0.5px\">Necessity</div><div style=\"font-size:20px;font-weight:700;color:#1a1a2e\">' + avgNecessity + '/100</div></div>';\nh += '<div style=\"flex:1;min-width:200px;background:#f8f9fa;padding:14px 18px;border-radius:8px;border-left:4px solid #FFB800\"><div style=\"font-size:12px;color:#888;text-transform:uppercase;letter-spacing:0.5px\">Recurring / Transcribed</div><div style=\"font-size:20px;font-weight:700;color:#1a1a2e\">' + recurringCount + '/' + count + ' \u2022 ' + transcriptRate + '%</div></div>';\nh += '</div>';\n\nif (top3.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:0 0 12px 0\">\ud83c\udfc6 Top Performers</h2>';\n  h += '<table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px\">';\n  h += '<tr style=\"background:#f8f9fa\"><th style=\"text-align:left;padding:8px 12px;color:#888;font-weight:500\">Meeting</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Score</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Effective</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Sentiment</th></tr>';\n  const medals = ['\ud83e\udd47', '\ud83e\udd48', '\ud83e\udd49'];\n  top3.forEach((m, i) => {\n    const fathomLink = m.fathom_call_id ? ' <a href=\"' + m.fathom_call_id + '\" style=\"font-size:11px;color:#FF6600\">\u25b6 recording</a>' : '';\n    h += '<tr style=\"border-bottom:1px solid #f0f0f0\"><td style=\"padding:10px 12px\">' + medals[i] + ' ' + m.summary + fathomLink + '</td><td style=\"padding:10px 12px;text-align:center\">' + badge(m.meeting_score, 100, [45, 70]) + '</td><td style=\"padding:10px 12px;text-align:center\">' + parseFloat(m.effective_time_percent).toFixed(0) + '%</td><td style=\"padding:10px 12px;text-align:center\">' + (m.sentiment || 'neutral') + '</td></tr>';\n  });\n  h += '</table>';\n}\n\nif (bottom3.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:0 0 12px 0\">\u26a0\ufe0f Needs Improvement</h2>';\n  h += '<table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px\">';\n  bottom3.forEach((m) => {\n    const necessity = parseFloat(m.meeting_necessity_score) || 100;\n    const asyncTag = necessity < 40 ? ' <span style=\"background:#fff3cd;color:#856404;padding:1px 6px;border-radius:4px;font-size:11px\">could be async</span>' : '';\n    h += '<tr style=\"border-bottom:1px solid #f0f0f0\"><td style=\"padding:10px 12px\">' + m.summary + asyncTag + '</td><td style=\"padding:10px 12px;text-align:center\">' + badge(m.meeting_score, 100, [45, 70]) + '</td></tr>';\n  });\n  h += '</table>';\n}\n\nif (participants.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:0 0 12px 0\">\ud83d\udc65 Participant Leaderboard</h2>';\n  h += '<table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px\">';\n  h += '<tr style=\"background:#f8f9fa\"><th style=\"text-align:left;padding:8px 12px;color:#888;font-weight:500\">#</th><th style=\"text-align:left;padding:8px 12px;color:#888;font-weight:500\">Name</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Score</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Role</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Decisions</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Speaking</th><th style=\"padding:8px 12px;color:#888;font-weight:500\">Meetings</th></tr>';\n  participants.slice(0, 8).forEach((p, i) => {\n    h += '<tr style=\"border-bottom:1px solid #f0f0f0\"><td style=\"padding:8px 12px;font-weight:600\">' + (i + 1) + '</td><td style=\"padding:8px 12px\">' + p.participant_name + '</td><td style=\"padding:8px 12px;text-align:center\">' + badge(p.avg_score, 100, [45, 70]) + '</td><td style=\"padding:8px 12px;text-align:center;font-size:12px;color:#888\">' + (p.most_common_role || 'contributor') + '</td><td style=\"padding:8px 12px;text-align:center\">' + (p.total_decisions || 0) + '</td><td style=\"padding:8px 12px;text-align:center\">' + parseFloat(p.total_speaking || 0).toFixed(0) + ' min</td><td style=\"padding:8px 12px;text-align:center\">' + (p.meetings_attended || 0) + '</td></tr>';\n  });\n  h += '</table>';\n}\n\nconst typeEntries = Object.entries(byType).sort((a, b) => b[1].count - a[1].count);\nif (typeEntries.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:0 0 12px 0\">\ud83d\udccb By Meeting Type</h2>';\n  h += '<div style=\"display:flex;flex-wrap:wrap;gap:8px;margin-bottom:24px\">';\n  typeEntries.forEach(([type, data]) => {\n    const avg = (data.totalScore / data.count).toFixed(0);\n    const hrs = (data.totalMin / 60).toFixed(1);\n    h += '<div style=\"background:#f8f9fa;padding:10px 16px;border-radius:8px;font-size:13px\"><strong>' + type + '</strong><br>' + data.count + ' mtg \u2022 avg ' + avg + ' \u2022 ' + hrs + 'h</div>';\n  });\n  h += '</div>';\n}\n\nif (couldBeEmail.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:0 0 12px 0\">\ud83d\udca1 Consider Making Async</h2>';\n  h += '<ul style=\"margin:0 0 24px 0;padding-left:20px;font-size:14px;color:#555\">';\n  couldBeEmail.forEach(m => {\n    h += '<li style=\"margin-bottom:6px\"><strong>' + m.summary + '</strong> \u2014 ' + (m.meeting_necessity_reason || 'Low live-discussion value') + '</li>';\n  });\n  h += '</ul>';\n}\n\nconst allUnresolved = [];\nfor (const m of meetings) {\n  try {\n    const ur = typeof m.unresolved_items === 'string' ? JSON.parse(m.unresolved_items) : (m.unresolved_items || []);\n    ur.forEach(u => { if (u) allUnresolved.push('<strong>' + m.summary + ':</strong> ' + u); });\n  } catch(e) {}\n}\nif (allUnresolved.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#e74c3c;margin:0 0 12px 0\">\ud83d\udea8 Unresolved Items</h2>';\n  h += '<ul style=\"margin:0 0 24px 0;padding-left:20px;font-size:14px;color:#555\">';\n  allUnresolved.slice(0, 8).forEach(u => { h += '<li style=\"margin-bottom:4px\">' + u + '</li>'; });\n  h += '</ul>';\n}\n\nconst allSuggestions = [];\nfor (const m of meetings) {\n  try {\n    const sug = typeof m.improvement_suggestions === 'string' ? JSON.parse(m.improvement_suggestions) : (m.improvement_suggestions || []);\n    sug.forEach(s => { if (s && !allSuggestions.includes(s)) allSuggestions.push(s); });\n  } catch(e) {}\n}\nif (allSuggestions.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:0 0 12px 0\">\ud83e\udde0 AI Recommendations</h2>';\n  h += '<ul style=\"margin:0 0 16px 0;padding-left:20px;font-size:14px;color:#555\">';\n  allSuggestions.slice(0, 6).forEach(s => { h += '<li style=\"margin-bottom:4px\">' + s + '</li>'; });\n  h += '</ul>';\n}\n\nh += '</div>';\nh += '<div style=\"background:#f8f9fa;padding:16px 28px;text-align:center;font-size:12px;color:#aaa;border-top:1px solid #eee\">';\nh += 'Smart Meeting Efficiency Analyzer v3 \u2022 n8n + GPT-4.1 + Fathom AI';\nh += '</div></div></body></html>';\n\nconst subject = '\ud83d\udcca Meeting Report: ' + tw.weekLabel + ' \u2014 Score ' + avgScore + '/100 | ' + count + ' meetings | ' + density + '% density';\n\nreturn [{ json: { report: h, subject: subject } }];"
+      },
+      "id": "sma-18",
+      "name": "Build Weekly Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4480,
+        300
+      ],
+      "notes": "UPDATED v3: OrangeHRM brand palette applied (#FF6600 primary, charcoal header, semantic green/red). Rich HTML email with 9 sections."
+    },
+    {
+      "parameters": {
+        "sendTo": "YOUR_RECIPIENT_EMAIL@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.report }}",
+        "options": {}
+      },
+      "id": "sma-19",
+      "name": "Gmail \u2013 Send Report",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        4760,
+        300
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "formTitle": "Meeting Efficiency Analyzer",
+        "formDescription": "Configure your analysis. Leave blank to use defaults (last full week, standard work hours).",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Date From",
+              "fieldType": "date",
+              "requiredField": false,
+              "placeholder": "Leave blank = last Monday"
+            },
+            {
+              "fieldLabel": "Date To",
+              "fieldType": "date",
+              "requiredField": false,
+              "placeholder": "Leave blank = last Sunday"
+            },
+            {
+              "fieldLabel": "Work Hours Per Day",
+              "fieldType": "number",
+              "requiredField": false,
+              "placeholder": "Default: 8"
+            },
+            {
+              "fieldLabel": "Work Days Per Week",
+              "fieldType": "number",
+              "requiredField": false,
+              "placeholder": "Default: 5"
+            },
+            {
+              "fieldLabel": "Minimum Meeting Duration (minutes)",
+              "fieldType": "number",
+              "requiredField": false,
+              "placeholder": "Default: 0 (include all)"
+            },
+            {
+              "fieldLabel": "Filter Meeting Type",
+              "fieldType": "dropdown",
+              "requiredField": false,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "All (default)"
+                  },
+                  {
+                    "option": "1:1"
+                  },
+                  {
+                    "option": "standup"
+                  },
+                  {
+                    "option": "planning"
+                  },
+                  {
+                    "option": "review"
+                  },
+                  {
+                    "option": "retrospective"
+                  },
+                  {
+                    "option": "all-hands"
+                  },
+                  {
+                    "option": "sync"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {
+          "respondWith": "text",
+          "responseText": "\u2705 Analysis started! Check your email for the report.",
+          "path": "meeting-analysis"
+        }
+      },
+      "id": "sma-f1",
+      "name": "Form Trigger \u2013 User Input",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        -120
+      ],
+      "notes": "User-facing form. All fields optional. If skipped, defaults to last full week + 8h/5d work week. Access via the form URL shown in n8n."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resolve user form inputs with smart defaults\n// Triggered from: Form Trigger, Weekly Schedule, or Manual Trigger\nconst now = new Date();\n\n// Determine source \u2014 form trigger passes $json with field names\nconst inp = $input.first()?.json || {};\n\n// Check if this came from a form (form fields present)\nconst hasFormInput = !!(inp['Date From'] || inp['Date To'] || inp['Work Hours Per Day']);\n\n// --- Date range ---\nlet from, to;\n\nif (inp['Date From']) {\n  from = new Date(inp['Date From']);\n  from.setHours(0,0,0,0);\n} else {\n  // Default: last full Monday\n  const day = now.getDay();\n  const diff = day === 0 ? -6 : 1 - day;\n  from = new Date(now);\n  from.setDate(now.getDate() + diff - 7);\n  from.setHours(0,0,0,0);\n}\n\nif (inp['Date To']) {\n  to = new Date(inp['Date To']);\n  to.setHours(23,59,59,999);\n} else {\n  // Default: last Sunday (6 days after last Monday)\n  to = new Date(from);\n  to.setDate(from.getDate() + 6);\n  to.setHours(23,59,59,999);\n}\n\n// Previous period (same duration, shifted back)\nconst rangeDays = Math.round((to - from) / 86400000) + 1;\nconst prevFrom = new Date(from); prevFrom.setDate(prevFrom.getDate() - rangeDays);\nconst prevTo   = new Date(to);   prevTo.setDate(prevTo.getDate() - rangeDays);\n\n// --- Work hours ---\nconst WORK_HRS  = parseFloat(inp['Work Hours Per Day'])  || 8;\nconst WORK_DAYS = parseFloat(inp['Work Days Per Week'])  || 5;\nconst MIN_DURATION = parseFloat(inp['Minimum Meeting Duration (minutes)']) || 0;\nconst typeFilter = (inp['Filter Meeting Type'] || 'All (default)') === 'All (default)'\n  ? null : inp['Filter Meeting Type'];\n\nconst weekLabel = from.toLocaleDateString('en-US', {month:'short',day:'numeric'})\n  + ' \u2013 ' + to.toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'});\n\nreturn [{\n  json: {\n    from: from.toISOString(),\n    to:   to.toISOString(),\n    prevFrom: prevFrom.toISOString(),\n    prevTo:   prevTo.toISOString(),\n    weekLabel,\n    totalWorkingMinutes: WORK_HRS * WORK_DAYS * 60,\n    workHoursPerDay:  WORK_HRS,\n    workDays:         WORK_DAYS,\n    minDuration:      MIN_DURATION,\n    typeFilter:       typeFilter,\n    userCustomized:   hasFormInput,\n    rangeLabel: hasFormInput\n      ? 'Custom range: ' + weekLabel\n      : 'Auto: last full week (' + weekLabel + ')'\n  }\n}];"
+      },
+      "id": "sma-3b",
+      "name": "Resolve Inputs & Defaults",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        300
+      ],
+      "notes": "Smart merge of user form inputs with defaults. If user skipped form, falls back to last full week + 8h/5d. Passes minDuration and typeFilter downstream."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "run-meeting-analysis",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "sma-w1",
+      "name": "Webhook \u2013 Dashboard Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        600
+      ],
+      "notes": "Called by the interactive dashboard's 'Run Analysis' button. Accepts JSON body: {dateFrom, dateTo, workHours, workDays}. Returns immediately via Respond to Webhook node."
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "meeting-dashboard",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "sma-d1",
+      "name": "Webhook \u2013 Serve Dashboard",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        3640,
+        -120
+      ],
+      "notes": "GET request serves the live interactive HTML dashboard. Share this URL with your team."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Try dashboard-specific queries first (webhook path), fall back to main flow nodes\nlet meetings = [];\ntry { meetings = $('Dash \\u2013 Query Meetings').all().map(i => i.json); } catch(e) {\n  try { meetings = $('Query Weekly Summary').all().map(i => i.json); } catch(e2) { meetings = []; }\n}\nlet participants = [];\ntry { participants = $('Dash \\u2013 Query Participants').all().map(i => i.json); } catch(e) {\n  try { participants = $('Query Participant Leaderboard').all().map(i => i.json); } catch(e2) { participants = []; }\n}\nlet tw = {};\ntry { tw = $('Resolve Inputs & Defaults').first().json; } catch(e) { tw = {}; }\nconst now = new Date();\nif (!tw.weekLabel) {\n  const day = now.getDay(); const diff = day === 0 ? -6 : 1 - day;\n  const lastMon = new Date(now); lastMon.setDate(now.getDate() + diff - 7); lastMon.setHours(0,0,0,0);\n  const lastSun = new Date(lastMon); lastSun.setDate(lastMon.getDate() + 6);\n  tw.weekLabel = lastMon.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' \\u2013 ' + lastSun.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});\n  tw.totalWorkingMinutes = tw.totalWorkingMinutes || 2400;\n}\nconst rangeLabel = tw.rangeLabel || tw.weekLabel || 'Latest Data';\n\nconst count = meetings.length;\nlet physicalCount = 0;\nlet physicalMeetings = [];\ntry {\n  if (meetings.length > 0 && meetings[0].physical_count !== undefined) {\n    physicalCount = parseInt(meetings[0].physical_count) || 0;\n  }\n  if (meetings.length > 0 && meetings[0].physical_meetings) {\n    physicalMeetings = typeof meetings[0].physical_meetings === 'string' ? JSON.parse(meetings[0].physical_meetings) : meetings[0].physical_meetings || [];\n  }\n} catch(e) {}\nconst totalMin = meetings.reduce((s,m) => s+(parseFloat(m.duration_minutes)||0),0);\nconst avgScore = count>0?(meetings.reduce((s,m)=>s+(parseFloat(m.meeting_score)||0),0)/count).toFixed(1):'0';\nconst avgEff = count>0?(meetings.reduce((s,m)=>s+(parseFloat(m.effective_time_percent)||0),0)/count).toFixed(1):'0';\nconst density = tw.totalWorkingMinutes>0?((totalMin/(tw.totalWorkingMinutes||2400))*100).toFixed(1):'0';\nconst transcribed = meetings.filter(m=>m.has_transcript).length;\n\nconst sorted = [...meetings].sort((a,b)=>(parseFloat(b.meeting_score)||0)-(parseFloat(a.meeting_score)||0));\nconst topMeetings = sorted.slice(0,5);\nconst lowMeetings = sorted.slice(-3).reverse();\n\nconst asyncMeetings = meetings.filter(m=>(parseFloat(m.meeting_necessity_score)||100)<40)\n  .sort((a,b)=>(parseFloat(a.meeting_necessity_score)||0)-(parseFloat(b.meeting_necessity_score)||0))\n  .slice(0,5);\n\nconst typeMap = {};\nfor(const m of meetings){\n  const t=m.meeting_type||'general';\n  if(!typeMap[t]) typeMap[t]={count:0,totalScore:0,totalMin:0};\n  typeMap[t].count++;\n  typeMap[t].totalScore+=parseFloat(m.meeting_score)||0;\n  typeMap[t].totalMin+=parseFloat(m.duration_minutes)||0;\n}\n\nconst allSuggestions = [];\nfor(const m of meetings){\n  try{ const arr=typeof m.improvement_suggestions==='string'?JSON.parse(m.improvement_suggestions):m.improvement_suggestions||[];\n    for(const s of arr) if(s && !allSuggestions.includes(s)) allSuggestions.push(s);\n  }catch(e){}\n}\n\nconst allUnresolved = [];\nfor(const m of meetings){\n  try{ const arr=typeof m.unresolved_items==='string'?JSON.parse(m.unresolved_items):m.unresolved_items||[];\n    for(const u of arr) allUnresolved.push({meeting:m.summary,item:u});\n  }catch(e){}\n}\n\nfunction scoreBadge(s){\n  const n=parseFloat(s)||0;\n  const c=n>=70?'#00C48C':n>=45?'#FFB800':'#FF3B5C';\n  return `<span style=\"background:${c}20;color:${c};padding:3px 10px;border-radius:20px;font-weight:700;font-size:13px;font-family:monospace\">${n}</span>`;\n}\n\nfunction typeEmoji(t){\n  const m={standup:'\ud83d\udd01','1:1':'\ud83d\udc64',planning:'\ud83d\uddfa',review:'\ud83d\udd0d',retrospective:'\ud83d\udd04','all-hands':'\ud83d\udce2',sync:'\ud83d\udd17',workshop:'\ud83d\udee0',brainstorm:'\ud83d\udca1',interview:'\ud83c\udfa4',general:'\ud83d\udccb'};\n  return m[t]||'\ud83d\udccb';\n}\n\nconst typeCards = Object.entries(typeMap).map(([t,v])=>{\n  const avg=(v.totalScore/v.count).toFixed(0);\n  const color=avg>=70?'#00C48C':avg>=45?'#FFB800':'#FF3B5C';\n  return `<div class=\"type-chip\">\n    <div style=\"font-size:22px;margin-bottom:6px\">${typeEmoji(t)}</div>\n    <div style=\"font-weight:800;font-size:14px;text-transform:capitalize\">${t}</div>\n    <div style=\"font-size:12px;color:#9898B8;margin:3px 0\">${v.count} mtg \u00b7 ${(v.totalMin/60).toFixed(1)}h</div>\n    <div style=\"background:${color}20;color:${color};padding:2px 9px;border-radius:10px;font-size:12px;font-weight:700;display:inline-block\">avg ${avg}</div>\n  </div>`;\n}).join('');\n\nconst topRows = topMeetings.map((m,i)=>{\n  const medals=['\ud83e\udd47','\ud83e\udd48','\ud83e\udd49','4\ufe0f\u20e3','5\ufe0f\u20e3'];\n  const sc=parseFloat(m.meeting_score)||0;\n  const barColor=sc>=70?'#00C48C':sc>=45?'#FFB800':'#FF3B5C';\n  const fathomLink=m.fathom_call_id?`<a href=\"${m.fathom_call_id}\" target=\"_blank\" style=\"color:#FF6600;font-size:11px;text-decoration:none\">\ud83c\udf99 Recording</a>`:'';\n  return `<tr>\n    <td style=\"font-size:20px;text-align:center\">${medals[i]||''}</td>\n    <td><strong>${m.summary||'Untitled'}</strong><br><span style=\"font-size:11px;color:#9898B8\">${new Date(m.start_time).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})} \u00b7 ${m.meeting_type||''} \u00b7 ${m.duration_minutes}min</span></td>\n    <td>${scoreBadge(m.meeting_score)}</td>\n    <td><div style=\"width:80px;height:6px;background:#f0f0f5;border-radius:3px\"><div style=\"width:${sc}%;height:100%;background:${barColor};border-radius:3px\"></div></div></td>\n    <td>${fathomLink}</td>\n  </tr>`;\n}).join('');\n\nconst lowRows = lowMeetings.map(m=>{\n  const ns=parseFloat(m.meeting_necessity_score)||0;\n  const asyncTag=ns<40?`<span style=\"background:#FFF9E6;color:#7A5500;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700\">ASYNC?</span>`:'';\n  return `<tr>\n    <td>\u26a0\ufe0f</td>\n    <td><strong>${m.summary||'Untitled'}</strong><br><span style=\"font-size:11px;color:#9898B8\">${m.meeting_type||''} \u00b7 ${m.duration_minutes}min \u00b7 ${m.attendee_count} ppl</span></td>\n    <td>${scoreBadge(m.meeting_score)}</td>\n    <td>${asyncTag}</td>\n    <td style=\"font-size:12px;color:#9898B8;max-width:180px\">${m.meeting_necessity_reason||''}</td>\n  </tr>`;\n}).join('');\n\nconst participantRows = participants.slice(0,10).map((p,i)=>{\n  const roleClass={facilitator:'#FF6600',contributor:'#00C48C',observer:'#9898B8',dominator:'#FF3B5C'};\n  const roleColor=roleClass[p.role]||'#9898B8';\n  return `<tr>\n    <td style=\"font-weight:800;color:#FF6600;font-family:monospace\">${String(i+1).padStart(2,'0')}</td>\n    <td><strong>${p.participant_name||p.participant_email||'Unknown'}</strong></td>\n    <td>${scoreBadge(p.avg_score)}</td>\n    <td><span style=\"background:${roleColor}20;color:${roleColor};padding:2px 9px;border-radius:5px;font-size:11px;font-weight:700;text-transform:uppercase;font-family:monospace\">${p.role||'?'}</span></td>\n    <td style=\"font-family:monospace;font-size:12px\">${(parseFloat(p.total_speaking_minutes)||0).toFixed(0)}min</td>\n    <td style=\"font-family:monospace;font-size:12px\">${p.total_decisions||0}</td>\n    <td style=\"font-size:12px;color:#9898B8\">${p.meetings_attended||0} meetings</td>\n  </tr>`;\n}).join('');\n\nconst suggItems = allSuggestions.slice(0,6).map((s,i)=>\n  `<div style=\"display:flex;gap:12px;padding:12px 16px;background:#F9FAFB;border:1px solid #E8EAEE;border-radius:10px;margin-bottom:8px;font-size:13.5px;color:#4A4A6A;line-height:1.55\">\n    <div style=\"width:22px;height:22px;background:#FF6600;color:#fff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0\">${i+1}</div>\n    <div>${s}</div>\n  </div>`\n).join('');\n\nconst unresolvedItems = allUnresolved.slice(0,6).map(u=>\n  `<div style=\"padding:11px 14px;background:#FFF0F3;border-left:3px solid #FF3B5C;border-radius:8px;margin-bottom:8px;font-size:13px\">\n    <strong>${u.meeting}:</strong> <span style=\"color:#4A4A6A\">${u.item}</span>\n  </div>`\n).join('');\n\nconst asyncItems = asyncMeetings.map(m=>\n  `<div style=\"display:flex;gap:14px;padding:14px 0;border-bottom:1px solid #E8EAEE\">\n    <div style=\"width:36px;height:36px;background:#FFF9E6;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0\">\ud83d\udce7</div>\n    <div style=\"flex:1\"><strong style=\"display:block;font-size:13.5px;margin-bottom:3px\">${m.summary}</strong><span style=\"font-size:12.5px;color:#4A4A6A\">${m.meeting_necessity_reason||'Could be handled async'}</span></div>\n    <div style=\"font-family:monospace;font-size:12px;font-weight:700;color:#FF3B5C;padding-top:2px\">${m.meeting_necessity_score}/100</div>\n  </div>`\n).join('');\n\n// Donut chart values\nconst totalDecMin = meetings.reduce((s,m)=>s+(parseFloat(m.decision_minutes)||0),0);\nconst totalDiscMin = meetings.reduce((s,m)=>s+(parseFloat(m.discussion_minutes)||0),0);\nconst totalIdleMin = meetings.reduce((s,m)=>s+(parseFloat(m.idle_minutes)||0),0);\nconst totalAllMin = totalDecMin+totalDiscMin+totalIdleMin||1;\nconst decPct = Math.round(totalDecMin/totalAllMin*100);\nconst discPct = Math.round(totalDiscMin/totalAllMin*100);\nconst idlePct = 100-decPct-discPct;\n\n// SVG donut segments\nconst r=52, cx=70, cy=70, circ=2*Math.PI*r;\nfunction segment(pct,offset,color){\n  const dash=pct/100*circ;\n  return `<circle cx=\"${cx}\" cy=\"${cy}\" r=\"${r}\" fill=\"none\" stroke=\"${color}\" stroke-width=\"22\" stroke-dasharray=\"${dash.toFixed(1)} ${(circ-dash).toFixed(1)}\" stroke-dashoffset=\"${(-offset/100*circ).toFixed(1)}\" transform=\"rotate(-90 ${cx} ${cy})\"/>`;\n}\nconst donutSvg = `<svg width=\"150\" height=\"150\" viewBox=\"0 0 140 140\">\n  <circle cx=\"70\" cy=\"70\" r=\"52\" fill=\"none\" stroke=\"#F5F6FA\" stroke-width=\"22\"/>\n  ${segment(decPct,0,'#FF6600')}\n  ${segment(discPct,decPct,'#00C48C')}\n  ${segment(idlePct,decPct+discPct,'#FFB800')}\n</svg>`;\n\n// --- Individual Meeting Deep Dive ---\nconst meetingDetailCards = sorted.map((m, i) => {\n  const startDate = new Date(m.start_time);\n  const dateStr = startDate.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});\n  const timeStr = startDate.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});\n  const sc = parseFloat(m.meeting_score)||0;\n  const eff = parseFloat(m.effective_time_percent)||0;\n  const ddr = parseFloat(m.decision_discussion_ratio)||0;\n  const necessity = parseFloat(m.meeting_necessity_score)||0;\n  let decisions=[]; try{decisions=typeof m.key_decisions==='string'?JSON.parse(m.key_decisions):m.key_decisions||[];}catch(e){}\n  let actions=[]; try{actions=typeof m.action_items==='string'?JSON.parse(m.action_items):m.action_items||[];}catch(e){}\n  let unresolved=[]; try{unresolved=typeof m.unresolved_items==='string'?JSON.parse(m.unresolved_items):m.unresolved_items||[];}catch(e){}\n  const barColor=sc>=70?'#00C48C':sc>=45?'#FFB800':'#FF3B5C';\n  const fathomLink=m.fathom_call_id?`<a href=\"${m.fathom_call_id}\" target=\"_blank\" style=\"color:#FF6600;font-size:12px;text-decoration:none;font-weight:600\">\\uD83C\\uDF99 Recording</a>`:'';\n  const txBadge=m.has_transcript?'<span style=\"background:#E8FAF4;color:#00C48C;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700\">TRANSCRIBED</span>':'<span style=\"background:#F5F6FA;color:#9898B8;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700\">NO TRANSCRIPT</span>';\n  const decisionsHtml=decisions.length>0?decisions.map(dd=>`<li>${typeof dd==='string'?dd:dd.task||dd.decision||JSON.stringify(dd)}</li>`).join(''):'<li style=\"color:#9898B8\">None recorded</li>';\n  const actionsHtml=actions.length>0?actions.map(a=>{\n    if(typeof a==='string') return `<li>${a}</li>`;\n    return `<li><strong>${a.task||a.action||''}</strong>${a.owner?' \\u2014 '+a.owner:''}${a.deadline?' (by '+a.deadline+')':''}</li>`;\n  }).join(''):'<li style=\"color:#9898B8\">None assigned</li>';\n  const unresolvedHtml=unresolved.length>0?unresolved.map(u=>`<li style=\"color:#FF3B5C\">${u}</li>`).join(''):'<li style=\"color:#00C48C\">All resolved \\u2713</li>';\n  return `<div class=\"mtg-card\" style=\"animation-delay:${i*0.05}s\">\n    <div class=\"mtg-header\" onclick=\"this.parentElement.classList.toggle('expanded')\">\n      <div style=\"display:flex;align-items:center;gap:12px;flex:1;min-width:0\">\n        <div style=\"font-size:18px\">${typeEmoji(m.meeting_type)}</div>\n        <div style=\"min-width:0\">\n          <div style=\"font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis\">${m.summary||'Untitled Meeting'}</div>\n          <div style=\"font-size:11.5px;color:#9898B8;margin-top:2px\">${dateStr} ${timeStr} \\u00b7 ${m.meeting_type||'general'} \\u00b7 ${m.duration_minutes}min \\u00b7 ${m.attendee_count} ppl</div>\n        </div>\n      </div>\n      <div style=\"display:flex;align-items:center;gap:14px;flex-shrink:0\">\n        ${txBadge}\n        ${scoreBadge(sc)}\n        <div style=\"width:60px;height:6px;background:#f0f0f5;border-radius:3px\"><div style=\"width:${sc}%;height:100%;background:${barColor};border-radius:3px\"></div></div>\n        <div class=\"mtg-chevron\">\\u25be</div>\n      </div>\n    </div>\n    <div class=\"mtg-body\">\n      <div class=\"mtg-metrics\">\n        <div class=\"mtg-metric\"><div class=\"mtg-metric-val\" style=\"color:#00C48C\">${eff}%</div><div class=\"mtg-metric-lbl\">Effective</div></div>\n        <div class=\"mtg-metric\"><div class=\"mtg-metric-val\" style=\"color:#FF6600\">${ddr}%</div><div class=\"mtg-metric-lbl\">Decision Ratio</div></div>\n        <div class=\"mtg-metric\"><div class=\"mtg-metric-val\" style=\"color:#3B82F6\">${necessity}/100</div><div class=\"mtg-metric-lbl\">Necessity</div></div>\n        <div class=\"mtg-metric\"><div class=\"mtg-metric-val\" style=\"color:#9898B8\">${m.sentiment||'neutral'}</div><div class=\"mtg-metric-lbl\">Sentiment</div></div>\n        <div class=\"mtg-metric\"><div class=\"mtg-metric-val\" style=\"color:#FFB800\">${m.is_recurring?'\\uD83D\\uDD01 Yes':'No'}</div><div class=\"mtg-metric-lbl\">Recurring</div></div>\n        <div class=\"mtg-metric\"><div class=\"mtg-metric-val\" style=\"color:${m.is_back_to_back?'#FF3B5C':'#00C48C'}\">${m.is_back_to_back?'\\u26a0\\ufe0f Yes':'No'}</div><div class=\"mtg-metric-lbl\">Back-to-back</div></div>\n      </div>\n      ${m.quality_summary?'<div class=\"mtg-summary\">'+m.quality_summary+'</div>':''}\n      <div class=\"mtg-details-grid\">\n        <div><div class=\"mtg-section-title\">\\u2705 Key Decisions</div><ul class=\"mtg-list mtg-list-green\">${decisionsHtml}</ul></div>\n        <div><div class=\"mtg-section-title\">\\uD83D\\uDCCB Action Items</div><ul class=\"mtg-list mtg-list-orange\">${actionsHtml}</ul></div>\n        <div><div class=\"mtg-section-title\">\\uD83D\\uDEA8 Unresolved</div><ul class=\"mtg-list mtg-list-red\">${unresolvedHtml}</ul></div>\n      </div>\n      ${fathomLink?'<div style=\"margin-top:14px\">'+fathomLink+'</div>':''}\n      ${m.meeting_necessity_reason?'<div style=\"margin-top:10px;font-size:12.5px;color:#4A4A6A;background:#F9FAFB;padding:10px 14px;border-radius:8px;border-left:3px solid #FFB800\"><strong style=\"color:#7A5500\">Necessity note:</strong> '+m.meeting_necessity_reason+'</div>':''}\n    </div>\n  </div>`;\n}).join('');\n\nconst html = `<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>Meeting Efficiency \u00b7 OrangeHRM</title>\n<link href=\"https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap\" rel=\"stylesheet\">\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\n:root{--orange:#FF6600;--charcoal:#1E1E2E;--bg:#F5F6FA;--surface:#fff;--border:#E8EAEE;--text:#1A1A2E;--muted:#9898B8;--green:#00C48C;--red:#FF3B5C;--yellow:#FFB800}\nbody{font-family:'Figtree',sans-serif;background:var(--bg);color:var(--text)}\n.sidebar{width:220px;background:var(--charcoal);position:fixed;top:0;left:0;bottom:0;display:flex;flex-direction:column;z-index:100}\n.sidebar::before{content:'';position:absolute;top:0;left:0;right:0;height:160px;background:linear-gradient(135deg,rgba(255,102,0,.22),transparent);pointer-events:none}\n.logo{padding:24px 20px 16px;display:flex;align-items:center;gap:10px}\n.logo-mark{width:36px;height:36px;background:#FF6600;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff;font-size:18px;box-shadow:0 4px 14px rgba(255,102,0,.45)}\n.logo-brand{font-size:14px;font-weight:800;color:#fff}.logo-sub{font-size:10px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:1px}\n.nav-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:rgba(255,255,255,.28);padding:16px 20px 5px}\n.nav-item{display:flex;align-items:center;gap:10px;padding:10px 20px;font-size:13px;font-weight:500;color:rgba(255,255,255,.55);cursor:pointer;border-left:3px solid transparent;text-decoration:none;transition:all .15s}\n.nav-item:hover{color:#fff;background:rgba(255,255,255,.05)}\n.nav-item.active{color:#fff;background:rgba(255,102,0,.14);border-left-color:#FF6600;font-weight:600}\n.nav-badge{margin-left:auto;background:#FF6600;color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px}\n.sidebar-footer{margin-top:auto;padding:14px 20px;border-top:1px solid rgba(255,255,255,.08);display:flex;align-items:center;gap:8px}\n.avatar{width:32px;height:32px;background:linear-gradient(135deg,#FF6600,#FF8C3A);border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;color:#fff;flex-shrink:0}\n.main{margin-left:220px;min-height:100vh;display:flex;flex-direction:column}\n.topbar{background:#fff;border-bottom:1px solid #E8EAEE;padding:0 32px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}\n.topbar h1{font-size:18px;font-weight:800;letter-spacing:-.3px}\n.topbar p{font-size:11.5px;color:var(--muted);margin-top:1px}\n.week-pill{background:#FFF0E6;color:#FF6600;padding:5px 13px;border-radius:20px;font-size:12px;font-weight:700;border:1px solid rgba(255,102,0,.2);font-family:monospace}\n.btn{background:#FF6600;color:#fff;border:none;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Figtree',sans-serif;display:flex;align-items:center;gap:6px;transition:all .18s;box-shadow:0 2px 10px rgba(255,102,0,.3)}\n.btn:hover{background:#FF7A1A;transform:translateY(-1px)}\n.btn:disabled{opacity:.6;cursor:default;transform:none}\n.content{padding:28px 32px;flex:1}\n/* Form panel */\n.form-panel{background:#fff;border:1px solid #E8EAEE;border-radius:14px;padding:24px;margin-bottom:24px;position:relative}\n.form-panel-title{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:16px;display:flex;align-items:center;gap:8px}\n.form-panel-title::after{content:'';flex:1;height:1px;background:#E8EAEE}\n.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}\n.form-field label{font-size:12px;font-weight:600;color:#4A4A6A;display:block;margin-bottom:5px}\n.form-field input,.form-field select{width:100%;padding:8px 12px;border:1px solid #E8EAEE;border-radius:8px;font-size:13.5px;font-family:'Figtree',sans-serif;color:#1A1A2E;background:#F9FAFB;transition:border .15s}\n.form-field input:focus,.form-field select:focus{outline:none;border-color:#FF6600;background:#fff}\n.form-actions{display:flex;gap:10px;align-items:center}\n.btn-skip{background:none;border:1px solid #E8EAEE;color:#9898B8;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Figtree',sans-serif;transition:all .15s}\n.btn-skip:hover{border-color:#FF6600;color:#FF6600}\n.status-msg{font-size:12.5px;color:var(--green);font-weight:600;display:flex;align-items:center;gap:6px;margin-left:8px}\n/* KPI */\n.kpi-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:22px}\n.kpi-card{background:#fff;border:1px solid #E8EAEE;border-radius:12px;padding:18px 16px;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s}\n.kpi-card:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.07)}\n.kpi-card::after{content:'';position:absolute;top:-25px;right:-25px;width:80px;height:80px;background:radial-gradient(circle,var(--glow,.1) 0%,transparent 70%);pointer-events:none}\n.kpi-icon{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:16px;margin-bottom:12px}\n.kpi-val{font-size:26px;font-weight:900;letter-spacing:-1px;line-height:1}\n.kpi-lbl{font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}\n.kpi-trend{font-size:11.5px;font-weight:600;margin-top:7px}\n.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}\n.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;margin-bottom:18px}\n.card{background:#fff;border:1px solid #E8EAEE;border-radius:13px;padding:22px}\n.card-title{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:16px;display:flex;align-items:center;gap:8px}\n.card-title::after{content:'';display:block;width:22px;height:3px;background:#FF6600;border-radius:2px;margin-left:auto}\n.data-table{width:100%;border-collapse:collapse;font-size:13px}\n.data-table th{text-align:left;padding:7px 10px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:2px solid #E8EAEE}\n.data-table td{padding:10px 10px;border-bottom:1px solid #E8EAEE;vertical-align:middle}\n.data-table tr:last-child td{border-bottom:none}\n.data-table tbody tr:hover td{background:#F9FAFB}\n.type-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px}\n.type-chip{background:#F9FAFB;border:1px solid #E8EAEE;border-radius:10px;padding:14px 12px;text-align:center;transition:all .15s}\n.type-chip:hover{border-color:#FF6600;background:#FFF0E6}\n.donut-wrap{display:flex;align-items:center;gap:22px}\n.legend-item{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px}\n.legend-dot{width:11px;height:11px;border-radius:3px;flex-shrink:0}\n.run-status{background:#FFF9E6;border:1px solid rgba(255,184,0,.3);border-left:4px solid #FFB800;border-radius:10px;padding:12px 16px;font-size:13px;color:#7A5500;margin-bottom:20px;display:none}\n@media(max-width:900px){.sidebar{display:none}.main{margin-left:0}.kpi-grid{grid-template-columns:repeat(2,1fr)}.grid2,.grid3{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr 1fr}}\n@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}\n.mtg-card{background:#fff;border:1px solid #E8EAEE;border-radius:11px;margin-bottom:10px;overflow:hidden;transition:all .2s;animation:fadeUp .4s ease both}.mtg-card:hover{border-color:#FF6600;box-shadow:0 2px 12px rgba(255,102,0,.08)}.mtg-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;cursor:pointer;gap:12px}.mtg-chevron{font-size:14px;color:#9898B8;transition:transform .2s}.mtg-card.expanded .mtg-chevron{transform:rotate(180deg)}.mtg-body{display:none;padding:0 18px 18px;border-top:1px solid #E8EAEE}.mtg-card.expanded .mtg-body{display:block}.mtg-metrics{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;padding:16px 0;border-bottom:1px solid #F0F0F5;margin-bottom:16px}.mtg-metric{text-align:center}.mtg-metric-val{font-size:16px;font-weight:800;font-family:\"JetBrains Mono\",monospace}.mtg-metric-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-top:3px;font-weight:600}.mtg-summary{font-size:13px;color:#4A4A6A;line-height:1.6;padding:12px 16px;background:#F9FAFB;border-radius:8px;margin-bottom:16px;border-left:3px solid #FF6600}.mtg-details-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}.mtg-section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#1A1A2E;margin-bottom:8px}.mtg-list{list-style:none;padding:0;font-size:13px;color:#4A4A6A}.mtg-list li{padding:5px 0;padding-left:14px;position:relative}.mtg-list li::before{content:\"\";position:absolute;left:0;top:11px;width:6px;height:6px;border-radius:50%}.mtg-list-green li::before{background:#00C48C}.mtg-list-orange li::before{background:#FF6600}.mtg-list-red li::before{background:#FF3B5C}.expand-all-btn{background:none;border:1px solid #E8EAEE;color:#9898B8;padding:5px 12px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:\"Figtree\",sans-serif;transition:all .15s}.expand-all-btn:hover{border-color:#FF6600;color:#FF6600}@media(max-width:900px){.mtg-metrics{grid-template-columns:repeat(3,1fr)}.mtg-details-grid{grid-template-columns:1fr}}\n.kpi-card,.card{animation:fadeUp .5s ease both}\n</style>\n</head>\n<body>\n<aside class=\"sidebar\">\n  <div class=\"logo\">\n    <div class=\"logo-mark\">O</div>\n    <div><div class=\"logo-brand\">OrangeHRM</div><div class=\"logo-sub\">Meeting Analytics</div></div>\n  </div>\n  <div class=\"nav-label\">Analytics</div>\n  <a class=\"nav-item active\" href=\"#\">\ud83d\udcca Meeting Efficiency <span class=\"nav-badge\">Live</span></a>\n  <a class=\"nav-item\" href=\"#\">\ud83d\udc65 Team Insights</a>\n  <a class=\"nav-item\" href=\"#\">\ud83d\udcc8 Trends</a>\n  <div class=\"nav-label\">Management</div>\n  <a class=\"nav-item\" href=\"#\">\ud83c\udfaf Action Items <span class=\"nav-badge\">${allUnresolved.length}</span></a>\n  <a class=\"nav-item\" href=\"#\">\ud83d\udcc5 Calendar</a>\n  <a class=\"nav-item\" href=\"#\">\u2699\ufe0f Settings</a>\n  <div class=\"sidebar-footer\">\n    <div class=\"avatar\">HR</div>\n    <div><div style=\"font-size:12px;font-weight:600;color:#fff\">OrangeHRM Admin</div><div style=\"font-size:10.5px;color:rgba(255,255,255,.4)\">HR Admin</div></div>\n  </div>\n</aside>\n\n<main class=\"main\">\n  <div class=\"topbar\">\n    <div>\n      <h1>Meeting Efficiency Dashboard</h1>\n      <p>AI-powered \u00b7 n8n \u00b7 GPT-4.1 \u00b7 Fathom AI \u00b7 Live from PostgreSQL</p>\n    </div>\n    <div style=\"display:flex;align-items:center;gap:10px\">\n      <div class=\"week-pill\" id=\"weekPill\">\ud83d\udcc5 ${rangeLabel}</div>\n      <button class=\"btn\" onclick=\"refreshDashboard()\" id=\"refreshBtn\">\ud83d\udd04 Refresh</button>\n    </div>\n  </div>\n\n  <div class=\"content\">\n\n    <!-- Analysis form -->\n    <div class=\"form-panel\" id=\"formPanel\">\n      <div class=\"form-panel-title\">\u2699\ufe0f Run Custom Analysis</div>\n      <div class=\"form-grid\">\n        <div class=\"form-field\"><label>Date From</label><input type=\"date\" id=\"dateFrom\" placeholder=\"Default: last Monday\"></div>\n        <div class=\"form-field\"><label>Date To</label><input type=\"date\" id=\"dateTo\" placeholder=\"Default: last Sunday\"></div>\n        <div class=\"form-field\"><label>Work Hours / Day</label><input type=\"number\" id=\"workHours\" min=\"1\" max=\"24\" placeholder=\"Default: 8\"></div>\n        <div class=\"form-field\"><label>Work Days / Week</label><input type=\"number\" id=\"workDays\" min=\"1\" max=\"7\" placeholder=\"Default: 5\"></div>\n        <div class=\"form-field\"><label>Min Duration (min)</label><input type=\"number\" id=\"minDuration\" min=\"0\" placeholder=\"0 = all meetings\"></div>\n        <div class=\"form-field\"><label>Filter Meeting Type</label>\n          <select id=\"typeFilter\">\n            <option value=\"\">All types</option>\n            <option>standup</option><option>1:1</option><option>planning</option>\n            <option>review</option><option>retrospective</option><option>all-hands</option><option>sync</option>\n          </select>\n        </div>\n      </div>\n      <div class=\"form-actions\">\n        <button class=\"btn\" onclick=\"runAnalysis()\" id=\"runBtn\">\u25b6 Run Analysis</button>\n        <button class=\"btn-skip\" onclick=\"skipForm()\">Skip \u2014 use defaults</button>\n        <span class=\"status-msg\" id=\"statusMsg\"></span>\n      </div>\n    </div>\n\n    <div class=\"run-status\" id=\"runStatus\">\u23f3 Analysis is running in the background. This page will auto-refresh in 90 seconds when results are ready.</div>\n\n    <!-- KPI Cards -->\n    <div class=\"kpi-grid\">\n      <div class=\"kpi-card\" style=\"--glow:rgba(0,196,140,.12)\">\n        <div class=\"kpi-icon\" style=\"background:#E8FAF4\">\ud83d\udcbb</div>\n        <div class=\"kpi-val\" style=\"color:#00C48C\">${count}</div>\n        <div class=\"kpi-lbl\">Virtual Meetings</div>\n        <div class=\"kpi-trend\" style=\"color:#9898B8\">analyzed with AI</div>\n      </div>\n      <div class=\"kpi-card\" style=\"--glow:rgba(255,102,0,.12)\">\n        <div class=\"kpi-icon\" style=\"background:#FFF0E6\">\ud83c\udfe2</div>\n        <div class=\"kpi-val\" style=\"color:#FF6600\">${physicalCount}</div>\n        <div class=\"kpi-lbl\">Physical Meetings</div>\n        <div class=\"kpi-trend\" style=\"color:#9898B8\">in-person (no transcript)</div>\n      </div>\n      <div class=\"kpi-card\" style=\"--glow:rgba(0,196,140,.12)\">\n        <div class=\"kpi-icon\" style=\"background:#E8FAF4\">\u23f1</div>\n        <div class=\"kpi-val\" style=\"color:#00C48C\">${(totalMin/60).toFixed(1)}h</div>\n        <div class=\"kpi-lbl\">Hours Spent</div>\n        <div class=\"kpi-trend\" style=\"color:#9898B8\">${totalMin.toFixed(0)} total minutes</div>\n      </div>\n      <div class=\"kpi-card\" style=\"--glow:rgba(59,130,246,.12)\">\n        <div class=\"kpi-icon\" style=\"background:#EEF4FF\">\ud83c\udfaf</div>\n        <div class=\"kpi-val\" style=\"color:#3B82F6\">${avgScore}</div>\n        <div class=\"kpi-lbl\">Avg Score /100</div>\n        <div class=\"kpi-trend\" style=\"color:${parseFloat(avgScore)>=70?'#00C48C':parseFloat(avgScore)>=45?'#FFB800':'#FF3B5C'}\">${parseFloat(avgScore)>=70?'\u2705 Healthy':parseFloat(avgScore)>=45?'\u26a0\ufe0f Moderate':'\ud83d\udd34 Needs work'}</div>\n      </div>\n      <div class=\"kpi-card\" style=\"--glow:rgba(255,184,0,.12)\">\n        <div class=\"kpi-icon\" style=\"background:#FFF9E6\">\u26a1</div>\n        <div class=\"kpi-val\" style=\"color:#FFB800\">${avgEff}%</div>\n        <div class=\"kpi-lbl\">Effective Time</div>\n        <div class=\"kpi-trend\" style=\"color:#9898B8\">avg across meetings</div>\n      </div>\n      <div class=\"kpi-card\" style=\"--glow:rgba(255,59,92,.12)\">\n        <div class=\"kpi-icon\" style=\"background:#FFF0F3\">\ud83d\uddd3</div>\n        <div class=\"kpi-val\" style=\"color:#FF3B5C\">${density}%</div>\n        <div class=\"kpi-lbl\">Calendar Density</div>\n        <div class=\"kpi-trend\" style=\"color:${parseFloat(density)>60?'#FF3B5C':parseFloat(density)>40?'#FFB800':'#00C48C'}\">${parseFloat(density)>60?'\ud83d\udd34 Overloaded':parseFloat(density)>40?'\u26a0\ufe0f Heavy':'\u2705 Healthy'}</div>\n      </div>\n    </div>\n\n    <!-- Top / Bottom meetings + Donut -->\n    <div class=\"grid2\">\n      <div class=\"card\">\n        <div class=\"card-title\">\ud83c\udfc6 Top Performing Meetings</div>\n        <table class=\"data-table\">\n          <thead><tr><th></th><th>Meeting</th><th>Score</th><th>Bar</th><th></th></tr></thead>\n          <tbody>${topRows||'<tr><td colspan=\"5\" style=\"text-align:center;color:#9898B8;padding:20px\">No meetings found for this period</td></tr>'}</tbody>\n        </table>\n      </div>\n      <div class=\"card\">\n        <div class=\"card-title\">\u26a0\ufe0f Needs Improvement</div>\n        <table class=\"data-table\">\n          <thead><tr><th></th><th>Meeting</th><th>Score</th><th></th><th>Reason</th></tr></thead>\n          <tbody>${lowRows||'<tr><td colspan=\"5\" style=\"text-align:center;color:#9898B8;padding:20px\">No low-score meetings \u2014 great week!</td></tr>'}</tbody>\n        </table>\n      </div>\n    </div>\n\n    <!-- Donut + Types -->\n    <div class=\"grid2\">\n      <div class=\"card\">\n        <div class=\"card-title\">\u23f1 Time Breakdown</div>\n        <div class=\"donut-wrap\">\n          <div style=\"position:relative;flex-shrink:0\">\n            ${donutSvg}\n            <div style=\"position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center\">\n              <div style=\"font-size:20px;font-weight:900;color:#FF6600\">${avgEff}%</div>\n              <div style=\"font-size:10px;color:#9898B8;font-weight:600;text-transform:uppercase\">effective</div>\n            </div>\n          </div>\n          <div style=\"flex:1\">\n            <div class=\"legend-item\"><div class=\"legend-dot\" style=\"background:#FF6600\"></div><div style=\"flex:1;color:#4A4A6A\">Decision time</div><strong style=\"font-family:monospace;color:#FF6600\">${decPct}%</strong></div>\n            <div class=\"legend-item\"><div class=\"legend-dot\" style=\"background:#00C48C\"></div><div style=\"flex:1;color:#4A4A6A\">Discussion</div><strong style=\"font-family:monospace;color:#00C48C\">${discPct}%</strong></div>\n            <div class=\"legend-item\"><div class=\"legend-dot\" style=\"background:#FFB800\"></div><div style=\"flex:1;color:#4A4A6A\">Idle / wasted</div><strong style=\"font-family:monospace;color:#FFB800\">${idlePct}%</strong></div>\n          </div>\n        </div>\n      </div>\n      <div class=\"card\">\n        <div class=\"card-title\">\ud83d\udccb By Meeting Type</div>\n        <div class=\"type-grid\">${typeCards||'<p style=\"color:#9898B8;font-size:13px\">No data</p>'}</div>\n      </div>\n    </div>\n\n    <!-- Participant leaderboard -->\n    <div class=\"card\" style=\"margin-bottom:18px\">\n      <div class=\"card-title\">\ud83d\udc65 Participant Leaderboard</div>\n      <table class=\"data-table\">\n        <thead><tr><th>#</th><th>Participant</th><th>Score</th><th>Role</th><th>Speaking</th><th>Decisions</th><th>Attendance</th></tr></thead>\n        <tbody>${participantRows||'<tr><td colspan=\"7\" style=\"text-align:center;color:#9898B8;padding:20px\">No participant data</td></tr>'}</tbody>\n      </table>\n    </div>\n\n    <!-- Individual Meeting Deep Dive -->\n    <div class=\"card\" style=\"margin-bottom:18px\">\n      <div class=\"card-title\" style=\"justify-content:space-between\">\n        <span>\ud83d\udd0d Individual Meeting Deep Dive</span>\n        <button class=\"expand-all-btn\" onclick=\"document.querySelectorAll('.mtg-card').forEach(c=>c.classList.toggle('expanded'))\">Toggle All</button>\n      </div>\n      ${meetingDetailCards||'<p style=\"color:#9898B8;font-size:13px;padding:16px\">No meetings found for this period. Run an analysis first.</p>'}\n    </div>\n\n    <!-- Physical Meetings Summary -->\n    \\${physicalCount > 0 ? '<div class=\"card\" style=\"margin-bottom:18px\"><div class=\"card-title\">\\uD83C\\uDFE2 Physical (In-Person) Meetings</div><table class=\"data-table\"><thead><tr><th>Meeting</th><th>Date</th><th>Duration</th><th>Type</th><th>Attendees</th></tr></thead><tbody>' + physicalMeetings.map(pm => '<tr><td><strong>' + pm.summary + '</strong></td><td>' + new Date(pm.start).toLocaleDateString(\"en-US\",{weekday:\"short\",month:\"short\",day:\"numeric\"}) + '</td><td>' + pm.duration + ' min</td><td>' + pm.type + '</td><td>' + pm.attendees + ' ppl</td></tr>').join('') + '</tbody></table><div style=\"padding:12px 16px;background:#F9FAFB;border-radius:0 0 10px 10px;font-size:12px;color:#9898B8;border-top:1px solid #E8EAEE\">\\u2139\\uFE0F These meetings happened in person and have no Fathom transcript. They are excluded from scores and AI analysis.</div></div>' : ''}\n\n    <div class=\"grid3\">\n      <!-- Consider async -->\n      <div class=\"card\">\n        <div class=\"card-title\">\ud83d\udca1 Consider Making Async</div>\n        ${asyncItems||'<p style=\"color:#00C48C;font-size:13px\">\u2705 All meetings seem necessary!</p>'}\n      </div>\n      <!-- Unresolved items -->\n      <div class=\"card\">\n        <div class=\"card-title\" style=\"color:#FF3B5C\">\ud83d\udea8 Unresolved Items</div>\n        ${unresolvedItems||'<p style=\"color:#00C48C;font-size:13px\">\u2705 No unresolved items</p>'}\n      </div>\n      <!-- AI Recommendations -->\n      <div class=\"card\">\n        <div class=\"card-title\">\ud83e\udde0 AI Recommendations</div>\n        ${suggItems||'<p style=\"color:#9898B8;font-size:13px\">Run analysis to generate recommendations</p>'}\n      </div>\n    </div>\n\n  </div><!-- /content -->\n\n  <div style=\"padding:16px 32px;border-top:1px solid #E8EAEE;display:flex;justify-content:space-between;align-items:center;font-size:11.5px;color:#9898B8;background:#fff\">\n    <div>Generated by <strong style=\"color:#FF6600\">Smart Meeting Efficiency Analyzer v4</strong> \u00b7 n8n + GPT-4.1 + Fathom AI</div>\n    <div style=\"font-family:monospace;font-size:11px\">Last updated: ${new Date().toLocaleString()}</div>\n  </div>\n</main>\n\n<script>\n  // Inject webhook URL \u2014 replace with your n8n cloud webhook URL\n  const WEBHOOK_URL = '__WEBHOOK_BASE_URL__/webhook/run-meeting-analysis';\n  \n  function runAnalysis() {\n    const btn = document.getElementById('runBtn');\n    const status = document.getElementById('statusMsg');\n    const runStatus = document.getElementById('runStatus');\n    btn.disabled = true;\n    btn.textContent = '\u23f3 Starting...';\n    \n    const body = {\n      dateFrom:   document.getElementById('dateFrom').value || null,\n      dateTo:     document.getElementById('dateTo').value   || null,\n      workHours:  document.getElementById('workHours').value ? parseFloat(document.getElementById('workHours').value) : 8,\n      workDays:   document.getElementById('workDays').value  ? parseFloat(document.getElementById('workDays').value)  : 5,\n      minDuration:parseFloat(document.getElementById('minDuration').value)||0,\n      typeFilter: document.getElementById('typeFilter').value||null\n    };\n    \n    fetch(WEBHOOK_URL, {\n      method:'POST',\n      headers:{'Content-Type':'application/json'},\n      body: JSON.stringify(body)\n    })\n    .then(r=>r.json())\n    .then(data=>{\n      status.innerHTML = '\u2705 ' + (data.message||'Analysis started!');\n      runStatus.style.display='block';\n      btn.textContent = '\u25b6 Run Analysis';\n      btn.disabled = false;\n      // Auto-refresh after 90s\n      setTimeout(()=>window.location.reload(), 90000);\n    })\n    .catch(()=>{\n      status.innerHTML = '\u274c Could not reach n8n. Check webhook URL.';\n      btn.textContent = '\u25b6 Run Analysis';\n      btn.disabled = false;\n    });\n  }\n  \n  function skipForm() {\n    fetch(WEBHOOK_URL, {\n      method:'POST',\n      headers:{'Content-Type':'application/json'},\n      body: JSON.stringify({useDefaults:true})\n    }).catch(()=>{});\n    document.getElementById('formPanel').style.display='none';\n    document.getElementById('runStatus').style.display='block';\n    setTimeout(()=>window.location.reload(), 90000);\n  }\n\n  function refreshDashboard(){\n    const btn=document.getElementById('refreshBtn');\n    btn.textContent='\u23f3 Loading...';\n    btn.disabled=true;\n    window.location.reload();\n  }\n</script>\n</body>\n</html>`;\n\nreturn [{ json: { dashboardHtml: html, contentType: 'text/html' } }];"
+      },
+      "id": "sma-d2",
+      "name": "Build Dashboard HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4480,
+        -120
+      ],
+      "notes": "Builds the full interactive HTML dashboard from live DB data. Queries come from Dash \u2013 Query Meetings/Participants (webhook path) or from main flow query nodes."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.dashboardHtml }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-cache, no-store"
+              }
+            ]
+          }
+        }
+      },
+      "id": "sma-d3",
+      "name": "Respond with Dashboard",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        4760,
+        -120
+      ],
+      "notes": "Returns the dashboard HTML as a proper HTML response. Open the webhook URL in any browser to see the live dashboard."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT meeting_id, summary, start_time, end_time, duration_minutes, meeting_type, is_recurring, is_back_to_back, attendee_count, has_transcript, fathom_call_id, decision_minutes, discussion_minutes, effective_minutes, idle_minutes, decision_discussion_ratio, effective_time_percent, meeting_score, meeting_necessity_score, meeting_necessity_reason, sentiment, key_decisions, action_items, unresolved_items, improvement_suggestions, quality_summary, created_at FROM meeting_metrics WHERE start_time >= NOW() - INTERVAL '14 days' ORDER BY meeting_score DESC;"
+      },
+      "id": "sma-d4",
+      "name": "Dash \u2013 Query Meetings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3920,
+        -120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres DB"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Queries the latest 14 days of meeting metrics from DB for the standalone dashboard."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE(participant_email, participant_name) as identity, participant_name, COUNT(DISTINCT meeting_id) as meetings_attended, ROUND(AVG(contribution_score)::numeric, 1) as avg_score, ROUND(SUM(speaking_time_minutes)::numeric, 1) as total_speaking, SUM(decision_contributions) as total_decisions, SUM(discussion_contributions) as total_discussions, MODE() WITHIN GROUP (ORDER BY role) as most_common_role FROM participant_metrics WHERE created_at >= NOW() - INTERVAL '14 days' GROUP BY COALESCE(participant_email, participant_name), participant_name ORDER BY avg_score DESC;"
+      },
+      "id": "sma-d5",
+      "name": "Dash \u2013 Query Participants",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4200,
+        -120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres DB"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Queries participant leaderboard data for the standalone dashboard."
+    },
+    {
+      "parameters": {
+        "operation": "page",
+        "pageType": "completionPage",
+        "completionTitle": "\u2705 Analysis Started!",
+        "completionMessage": "Your meeting analysis is running in the background.\n\nYou will receive the full report by email in approximately 2 minutes.\n\nYou can also open the live dashboard to see results as they appear.",
+        "options": {}
+      },
+      "id": "sma-fe",
+      "name": "Form Ending \u2013 Confirmation",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        280,
+        -120
+      ],
+      "notes": "Shows a confirmation page to the user after they submit the analysis form. Required by n8n \u2014 Form Trigger cannot use Respond to Webhook."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"started\",\"message\":\"Analysis running in background. Check your email in ~2 minutes or open the dashboard.\"}",
+        "options": {}
+      },
+      "id": "sma-w2",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        280,
+        600
+      ],
+      "notes": "Immediately acknowledges the dashboard POST webhook so the browser UI does not hang. Only connected to Webhook \u2013 Dashboard Trigger (NOT Form Trigger)."
+    },
+    {
+      "parameters": {
+        "jsCode": "const meetings = $('Query Weekly Summary').all().map(i => i.json);\nconst participants = $('Query Participant Leaderboard').all().map(i => i.json);\nlet tw = {};\ntry { tw = $('Resolve Inputs & Defaults').first().json; } catch(e) { tw = { weekLabel: 'Latest Week' }; }\n\nif (!participants.length) {\n  return [{ json: { subject: '\\U0001F4CB Self Evaluation - No Data', report: '<p>No participant data available.</p>' } }];\n}\n\n// Identify \"self\" = participant who attended the most meetings (calendar owner)\nconst self = participants.reduce((a, b) =>\n  (parseInt(a.meetings_attended)||0) >= (parseInt(b.meetings_attended)||0) ? a : b\n);\n\nconst name = self.participant_name;\nconst email = self.identity || name;\nconst avgScore = parseFloat(self.avg_score) || 0;\nconst totalSpeaking = parseFloat(self.total_speaking) || 0;\nconst totalDec = parseInt(self.total_decisions) || 0;\nconst totalDisc = parseInt(self.total_discussions) || 0;\nconst attended = parseInt(self.meetings_attended) || 0;\nconst role = (self.most_common_role || self.role || 'contributor').toLowerCase();\nconst rank = participants.findIndex(p => p.participant_name === name) + 1;\nconst totalP = participants.length;\n\nconst totalMeetMin = meetings.reduce((s,m) => s+(parseFloat(m.duration_minutes)||0), 0);\nconst speakRatio = totalMeetMin > 0 ? ((totalSpeaking / totalMeetMin) * 100).toFixed(1) : '0';\nconst personalDDR = (totalDec+totalDisc) > 0 ? ((totalDec/(totalDec+totalDisc))*100).toFixed(0) : '0';\nconst avgMeetScore = meetings.length > 0 ? (meetings.reduce((s,m)=>s+(parseFloat(m.meeting_score)||0),0)/meetings.length).toFixed(1) : '0';\n\n// Strengths & Improvements\nconst strengths = [];\nconst improvements = [];\n\nif (avgScore >= 75) strengths.push({icon:'\\U0001F3AF',area:'High Impact Contributor',detail:'Score ' + avgScore + '/100 \\u2014 you consistently drive value in meetings.'});\nelse if (avgScore >= 55) { strengths.push({icon:'\\u2705',area:'Steady Contributor',detail:'Score ' + avgScore + '/100 shows reliable participation.'}); improvements.push({icon:'\\U0001F4C8',area:'Increase Impact',detail:'Prepare 2-3 key talking points and propose action items to push above 75.'}); }\nelse improvements.push({icon:'\\u26a0\\ufe0f',area:'Meeting Engagement',detail:'Score ' + avgScore + '/100 is low. Prepare points before each meeting and actively participate.'});\n\nconst sr = parseFloat(speakRatio);\nif (sr > 40) improvements.push({icon:'\\U0001F399\\ufe0f',area:'Communication Balance',detail:'You spoke ' + speakRatio + '% of total time. Create space for others \\u2014 practice active listening.'});\nelse if (sr >= 15) strengths.push({icon:'\\U0001F4AC',area:'Communication Balance',detail:speakRatio + '% speaking ratio \\u2014 healthy balance of contributing and listening.'});\nelse if (sr < 8 && attended > 1) improvements.push({icon:'\\U0001F4E2',area:'Speak Up More',detail:'Only ' + speakRatio + '% speaking time. Share insights, ask questions, propose ideas.'});\n\nif (role === 'facilitator') strengths.push({icon:'\\U0001F451',area:'Leadership',detail:'You frequently facilitate \\u2014 strong organizational and initiative skills.'});\nelse if (role === 'observer') improvements.push({icon:'\\U0001F440',area:'Active Participation',detail:'Mostly observer role. Try leading a section, taking notes, or asking clarifying questions.'});\nelse if (role === 'dominator') improvements.push({icon:'\\u270b',area:'Collaboration',detail:'You tend to dominate. Practice asking open-ended questions and pausing for responses.'});\n\nif (totalDec > totalDisc) strengths.push({icon:'\\u26a1',area:'Decision-Oriented',detail:totalDec + ' decision vs ' + totalDisc + ' discussion contributions \\u2014 you focus on outcomes.'});\nelse if (totalDec === 0 && attended > 2) improvements.push({icon:'\\U0001F4A1',area:'Decision Making',detail:'Zero decision contributions across ' + attended + ' meetings. Propose solutions and make clear recommendations.'});\n\nif (attended > 15) improvements.push({icon:'\\U0001F4C5',area:'Meeting Overload',detail:attended + ' meetings is heavy. Decline non-essential ones or suggest async for low-score meetings.'});\n\n// Next meeting prep by type\nconst typeMap = {};\nfor (const m of meetings) { const t=m.meeting_type||'general'; typeMap[t]=(typeMap[t]||0)+1; }\nconst prepGuide = {\n  standup: {icon:'\\U0001F504',tip:'Prepare a 30-second update: done, planned, blockers. Be concise.'},\n  '1:1': {icon:'\\U0001F464',tip:'Write 3 topics: career goals, feedback needed, project blockers.'},\n  planning: {icon:'\\U0001F5FA\\ufe0f',tip:'Review backlog beforehand. Come with effort estimates for your tasks.'},\n  review: {icon:'\\U0001F50D',tip:'Test the feature/code before the meeting. Prepare specific constructive feedback.'},\n  retrospective: {icon:'\\U0001F504',tip:'Think of 1 win, 1 pain point, and 1 actionable improvement.'},\n  'all-hands': {icon:'\\U0001F4E2',tip:'Prepare 1 question for leadership. Note action items for your team.'},\n  sync: {icon:'\\U0001F517',tip:'Bring status updates and blockers. Keep it focused on cross-team dependencies.'},\n  general: {icon:'\\U0001F4CB',tip:'Review the agenda 5 min before. Prepare 2-3 talking points.'}\n};\n\nconst sortedTypes = Object.entries(typeMap).sort((a,b)=>b[1]-a[1]);\nconst prepCards = sortedTypes.map(([type, count]) => {\n  const g = prepGuide[type] || prepGuide.general;\n  return '<div style=\"background:#F9FAFB;border:1px solid #E8EAEE;border-radius:10px;padding:16px;margin-bottom:10px\">' +\n    '<div style=\"display:flex;align-items:center;gap:8px;margin-bottom:8px\"><span style=\"font-size:20px\">' + g.icon + '</span><strong style=\"text-transform:capitalize\">' + type + '</strong><span style=\"background:#FFF0E6;color:#FF6600;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700\">' + count + ' meetings</span></div>' +\n    '<div style=\"font-size:13.5px;color:#4A4A6A;line-height:1.5\">' + g.tip + '</div></div>';\n}).join('');\n\n// Skill radar values\nconst communication = Math.min(100, Math.round(sr * 2.5 + avgScore * 0.3));\nconst leadership = role === 'facilitator' ? 85 : role === 'contributor' ? 55 : role === 'observer' ? 25 : 40;\nconst decisionMaking = Math.min(100, parseInt(personalDDR) * 1.2 + (totalDec > 0 ? 20 : 0));\nconst collaboration = Math.min(100, avgScore * 0.6 + (sr > 10 && sr < 35 ? 30 : 10) + (totalDisc > 0 ? 15 : 0));\nconst efficiency = Math.min(100, parseFloat(avgMeetScore) * 0.8 + (attended < 12 ? 20 : 0));\n\nfunction skillBar(label, val, color) {\n  return '<div style=\"margin-bottom:14px\"><div style=\"display:flex;justify-content:space-between;margin-bottom:5px\"><span style=\"font-size:13px;font-weight:600;color:#1A1A2E\">' + label + '</span><span style=\"font-size:13px;font-weight:800;font-family:monospace;color:' + color + '\">' + val + '/100</span></div><div style=\"height:8px;background:#F0F0F5;border-radius:4px;overflow:hidden\"><div style=\"height:100%;width:' + val + '%;background:' + color + ';border-radius:4px;transition:width .5s\"></div></div></div>';\n}\n\nconst overallGrade = Math.round((communication + leadership + decisionMaking + collaboration + efficiency) / 5);\nconst gradeColor = overallGrade >= 70 ? '#00C48C' : overallGrade >= 45 ? '#FFB800' : '#FF3B5C';\nconst gradeLabel = overallGrade >= 80 ? 'Excellent' : overallGrade >= 65 ? 'Good' : overallGrade >= 45 ? 'Average' : 'Needs Work';\n\n// TOP IMPROVEMENT FOCUS\nconst topFocus = improvements.length > 0 ? improvements[0] : { icon:'\\u2705', area:'Maintain Momentum', detail:'Great performance! Keep showing up prepared and engaged.' };\n\n// Build HTML\nlet h = '<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body style=\"margin:0;padding:0;background:#f4f6f9;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif\">';\nh += '<div style=\"max-width:680px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08)\">';\n\n// Header\nh += '<div style=\"background:linear-gradient(135deg,#1E1E2E 50%,#FF6600);padding:28px 32px;color:#fff\">';\nh += '<h1 style=\"margin:0 0 4px 0;font-size:22px\">\\U0001F9D1\\u200d\\U0001F4BC Personal Meeting Self-Evaluation</h1>';\nh += '<p style=\"margin:0;opacity:0.85;font-size:14px\">\\U0001F4C5 ' + (tw.weekLabel || 'Latest Week') + ' \\u00b7 ' + name + ' (' + email + ')</p>';\nh += '</div>';\n\n// Overall grade card\nh += '<div style=\"display:flex;align-items:center;gap:24px;padding:24px 32px;border-bottom:1px solid #eee\">';\nh += '<div style=\"width:80px;height:80px;border-radius:50%;background:' + gradeColor + '20;display:flex;align-items:center;justify-content:center;flex-shrink:0\"><div style=\"text-align:center\"><div style=\"font-size:28px;font-weight:900;color:' + gradeColor + '\">' + overallGrade + '</div><div style=\"font-size:10px;color:' + gradeColor + ';font-weight:700;text-transform:uppercase\">' + gradeLabel + '</div></div></div>';\nh += '<div style=\"flex:1\"><div style=\"font-size:16px;font-weight:700;color:#1A1A2E;margin-bottom:4px\">Overall Meeting Performance</div>';\nh += '<div style=\"font-size:13px;color:#888\">Rank <strong style=\"color:#FF6600\">#' + rank + '</strong> of ' + totalP + ' participants \\u00b7 ' + attended + ' meetings attended \\u00b7 ' + totalSpeaking.toFixed(0) + ' min speaking</div></div></div>';\n\n// Quick stats\nh += '<div style=\"display:flex;border-bottom:1px solid #eee\">';\nconst qs = (icon,label,value,sub) => '<div style=\"flex:1;padding:16px 20px;text-align:center;border-right:1px solid #eee\"><div style=\"font-size:18px\">' + icon + '</div><div style=\"font-size:20px;font-weight:700;color:#1a1a2e\">' + value + '</div><div style=\"font-size:11px;color:#888\">' + label + '</div>' + (sub?'<div style=\"font-size:10px;color:#aaa;margin-top:2px\">' + sub + '</div>':'') + '</div>';\nh += qs('\\U0001F4C5','Meetings',attended,'attended');\nh += qs('\\U0001F399\\ufe0f','Speaking',totalSpeaking.toFixed(0)+'min',speakRatio+'% of time');\nh += qs('\\u26a1','Decisions',totalDec,personalDDR+'% ratio');\nh += qs('\\U0001F3AF','Avg Score',avgScore+'/100',role);\nh += '</div>';\n\n// Content area\nh += '<div style=\"padding:24px 28px\">';\n\n// Skill breakdown\nh += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:0 0 16px 0\">\\U0001F4CA Skill Assessment</h2>';\nh += skillBar('\\U0001F4AC Communication', communication, '#3B82F6');\nh += skillBar('\\U0001F451 Leadership', leadership, '#FF6600');\nh += skillBar('\\u26a1 Decision Making', decisionMaking, '#00C48C');\nh += skillBar('\\U0001F91D Collaboration', collaboration, '#9333EA');\nh += skillBar('\\u23f1 Efficiency', efficiency, '#FFB800');\n\n// Strengths\nif (strengths.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#00C48C;margin:24px 0 12px 0\">\\U0001F4AA Your Strengths</h2>';\n  strengths.forEach(s => {\n    h += '<div style=\"display:flex;gap:12px;padding:12px 16px;background:#E8FAF4;border-radius:10px;margin-bottom:8px;border-left:4px solid #00C48C\">';\n    h += '<div style=\"font-size:18px\">' + s.icon + '</div>';\n    h += '<div><strong style=\"font-size:13px;color:#1A1A2E\">' + s.area + '</strong><div style=\"font-size:12.5px;color:#4A4A6A;margin-top:2px\">' + s.detail + '</div></div></div>';\n  });\n}\n\n// Improvements\nif (improvements.length > 0) {\n  h += '<h2 style=\"font-size:16px;color:#FF6600;margin:24px 0 12px 0\">\\U0001F527 Areas to Improve</h2>';\n  improvements.forEach(imp => {\n    h += '<div style=\"display:flex;gap:12px;padding:12px 16px;background:#FFF0E6;border-radius:10px;margin-bottom:8px;border-left:4px solid #FF6600\">';\n    h += '<div style=\"font-size:18px\">' + imp.icon + '</div>';\n    h += '<div><strong style=\"font-size:13px;color:#1A1A2E\">' + imp.area + '</strong><div style=\"font-size:12.5px;color:#4A4A6A;margin-top:2px\">' + imp.detail + '</div></div></div>';\n  });\n}\n\n// Prep guide\nh += '<h2 style=\"font-size:16px;color:#1a1a2e;margin:24px 0 12px 0\">\\U0001F4DD Next Meeting Prep Guide</h2>';\nh += prepCards;\n\n// Top focus box\nh += '<div style=\"background:linear-gradient(135deg,#1E1E2E,#2D2D44);color:#fff;border-radius:12px;padding:20px 24px;margin-top:24px\">';\nh += '<div style=\"font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:rgba(255,255,255,.5);margin-bottom:8px\">\\U0001F3AF #1 Focus for Next Week</div>';\nh += '<div style=\"font-size:15px;font-weight:600\">' + topFocus.icon + ' ' + topFocus.area + '</div>';\nh += '<div style=\"font-size:13px;opacity:.85;margin-top:6px;line-height:1.5\">' + topFocus.detail + '</div></div>';\n\nh += '</div>';\n\n// Footer\nh += '<div style=\"background:#f8f9fa;padding:16px 28px;text-align:center;font-size:12px;color:#aaa;border-top:1px solid #eee\">';\nh += 'Self-Evaluation by <strong style=\"color:#FF6600\">Smart Meeting Efficiency Analyzer v5</strong> \\u00b7 n8n + GPT-4.1 + Fathom AI';\nh += '</div></div></body></html>';\n\nconst subject = '\\U0001F9D1\\u200d\\U0001F4BC Self-Evaluation: ' + name + ' \\u2014 Score ' + overallGrade + '/100 | ' + (tw.weekLabel || 'Latest Week');\n\nreturn [{ json: { report: h, subject } }];"
+      },
+      "id": "sma-20",
+      "name": "Build Self Evaluation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4480,
+        580
+      ],
+      "notes": "Generates personalized self-evaluation report for the calendar owner. Identifies self as the participant with highest meeting attendance. Includes skill assessment, strengths, improvements, and next-meeting prep guide."
+    },
+    {
+      "parameters": {
+        "sendTo": "YOUR_RECIPIENT_EMAIL@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.report }}",
+        "options": {}
+      },
+      "id": "sma-21",
+      "name": "Gmail \u2013 Send Self Report",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        4760,
+        580
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Weekly Schedule": {
+      "main": [
+        [
+          {
+            "node": "Resolve Inputs & Defaults",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Resolve Inputs & Defaults",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Calendar \u2013 Get Events": {
+      "main": [
+        [
+          {
+            "node": "Filter & Classify Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Classify Events": {
+      "main": [
+        [
+          {
+            "node": "Fathom \u2013 Fetch Meetings & Transcripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fathom \u2013 Fetch Meetings & Transcripts": {
+      "main": [
+        [
+          {
+            "node": "Match & Extract Fathom Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match & Extract Fathom Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare AI Prompt": {
+      "main": [
+        [
+          {
+            "node": "OpenAI \u2013 Analyze Meeting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI \u2013 Analyze Meeting": {
+      "main": [
+        [
+          {
+            "node": "Compute Scores & Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Scores & Metrics": {
+      "main": [
+        [
+          {
+            "node": "Build Meeting Insert SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Meeting Insert SQL": {
+      "main": [
+        [
+          {
+            "node": "Postgres \u2013 Upsert Meeting Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres \u2013 Upsert Meeting Metrics": {
+      "main": [
+        [
+          {
+            "node": "Explode Participants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explode Participants": {
+      "main": [
+        [
+          {
+            "node": "Postgres \u2013 Upsert Participant Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres \u2013 Upsert Participant Metrics": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Trigger": {
+      "main": [
+        [
+          {
+            "node": "Query Weekly Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Weekly Summary": {
+      "main": [
+        [
+          {
+            "node": "Query Previous Week",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Previous Week": {
+      "main": [
+        [
+          {
+            "node": "Query Participant Leaderboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Participant Leaderboard": {
+      "main": [
+        [
+          {
+            "node": "Build Weekly Report",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Self Evaluation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Weekly Report": {
+      "main": [
+        [
+          {
+            "node": "Gmail \u2013 Send Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Form Trigger \u2013 User Input": {
+      "main": [
+        [
+          {
+            "node": "Form Ending \u2013 Confirmation",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Resolve Inputs & Defaults",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook \u2013 Dashboard Trigger": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Resolve Inputs & Defaults",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Inputs & Defaults": {
+      "main": [
+        [
+          {
+            "node": "Google Calendar \u2013 Get Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        []
+      ]
+    },
+    "Webhook \u2013 Serve Dashboard": {
+      "main": [
+        [
+          {
+            "node": "Dash \u2013 Query Meetings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dash \u2013 Query Meetings": {
+      "main": [
+        [
+          {
+            "node": "Dash \u2013 Query Participants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dash \u2013 Query Participants": {
+      "main": [
+        [
+          {
+            "node": "Build Dashboard HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dashboard HTML": {
+      "main": [
+        [
+          {
+            "node": "Respond with Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Self Evaluation": {
+      "main": [
+        [
+          {
+            "node": "Gmail \u2013 Send Self Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "smart-meeting-efficiency-analyzer-v5"
+  },
+  "tags": [
+    "meetings",
+    "ai",
+    "efficiency",
+    "google-calendar",
+    "fathom",
+    "analytics"
+  ],
+  "_readme": {
+    "version": "5.0",
+    "fathomAPIFixes": {
+      "correctEndpoint": "https://api.fathom.ai/external/v1/meetings",
+      "wrongEndpointInV2": "https://api.fathom.video/v1/calls",
+      "authMethod": "X-Api-Key header (NOT Authorization: Bearer)",
+      "transcriptParam": "include_transcript=true (inline in same response)",
+      "summaryParam": "include_summary=true",
+      "dateFilters": "created_after and created_before (ISO8601)",
+      "responseShape": "{ items: [{title, meeting_title, scheduled_start_time, transcript:[{speaker:{display_name, matched_calendar_invitee_email}, text, timestamp}], default_summary:{markdown_formatted}, action_items:[{description,assignee,completed}], calendar_invitees:[{name,email}]}], next_cursor }",
+      "matchingStrategy": "Match Fathom recording to Calendar event by scheduled_start_time proximity (within \u00b130 min)",
+      "rateLimit": "60 requests/minute per user across all API keys",
+      "apiKeyLocation": "Fathom Settings \u2192 API Access \u2192 Generate API Key"
+    },
+    "workflowImprovementsFromV2": [
+      "FIXED: Fathom endpoint, auth header, and response parsing completely rewritten",
+      "FIXED: Matching algorithm uses \u00b130 min time-proximity instead of title string match",
+      "FIXED: Transcript extracted as readable [timestamp] Speaker: text format for AI",
+      "FIXED: Speaker word counts pre-computed and passed to AI prompt",
+      "ADDED: Fathom action items merged with AI-detected action items (deduplicated)",
+      "ADDED: Fathom AI summary passed as additional AI context",
+      "ADDED: participant_email stored in DB for identity deduplication",
+      "ADDED: fathom_call_id stored in DB, linked in email report",
+      "ADDED: most_common_role in leaderboard query",
+      "ADDED: Fathom coverage stat in report header",
+      "IMPROVED: Leaderboard now groups by email OR name to handle name variations",
+      "IMPROVED: OpenAI maxTokens increased to 2000 for large meetings"
+    ],
+    "setupSteps": [
+      "1. POSTGRES: Run the SQL in the separate setup file (meeting-efficiency-db-setup.sql)",
+      "2. GOOGLE CALENDAR: Set up OAuth2 credentials \u2192 replace YOUR_GOOGLE_CALENDAR_CREDENTIAL_ID",
+      "3. FATHOM: Go to fathom.video/customize#api-access-header \u2192 Generate API Key \u2192 add as HTTP Header Auth credential in n8n with header name 'X-Api-Key' \u2192 replace credential reference in node sma-6",
+      "4. OPENAI: Add OpenAI API key as credential \u2192 replace YOUR_OPENAI_CREDENTIAL_ID",
+      "5. POSTGRES CREDENTIALS: Add Postgres credentials \u2192 replace all YOUR_POSTGRES_CREDENTIAL_ID",
+      "6. GMAIL: Set up Gmail OAuth2 credentials \u2192 replace YOUR_GMAIL_CREDENTIAL_ID \u2192 set sendTo email",
+      "7. TEST: Use Manual Trigger first to verify each node step-by-step",
+      "8. FORM URL: Activate workflow \u2192 copy Form Trigger URL \u2192 share with team for on-demand analysis",
+      "9. DASHBOARD URL: Copy 'Webhook \u2013 Serve Dashboard' production URL \u2192 bookmark in browser \u2192 share with stakeholders",
+      "10. WEBHOOK CONFIG: In Build Dashboard HTML node, replace __WEBHOOK_BASE_URL__ with your n8n cloud base URL (e.g. https://your-org.app.n8n.cloud)"
+    ],
+    "v4Changes": [
+      "ADDED: n8n Form Trigger with 6 optional fields (date range, work hours, min duration, type filter)",
+      "ADDED: Resolve Inputs & Defaults node \u2014 merges user input with smart defaults (last full week, 8h/5d)",
+      "ADDED: Webhook trigger from dashboard \u2014 users can trigger analysis directly from the browser UI",
+      "ADDED: Live interactive HTML dashboard served via GET webhook \u2014 open in any browser",
+      "ADDED: Dashboard has form panel to run custom analyses without going into n8n",
+      "ADDED: Auto-refresh after 90s when analysis triggered from dashboard",
+      "CHANGED: Build Weekly Report now branches to both Gmail AND Build Dashboard HTML",
+      "CHANGED: Filter & Classify Events now respects minDuration and typeFilter from user input",
+      "DASHBOARD URL: Copy the 'Webhook \u2013 Serve Dashboard' production URL and bookmark it"
+    ],
+    "v41Fixes": [
+      "FIXED: Removed Respond to Webhook from Form Trigger path \u2014 incompatible combination",
+      "FIXED: Added n8n Form node (Page Type = completionPage) as Form Ending \u2014 correct pattern",
+      "FIXED: Deleted stale 'Compute Time Window' connection leftover from v3",
+      "FIXED: Form Trigger now branches correctly: Form Ending (user sees confirmation) + Resolve Inputs (analysis runs)",
+      "FIXED: Webhook \u2013 Dashboard Trigger correctly branches: Respond to Webhook (immediate ack) + Resolve Inputs (analysis)",
+      "NOTE: Form Trigger version 2.2 \u2192 update to 2.5 in n8n UI (right-click node \u2192 Update version)"
+    ],
+    "v5Changes": [
+      "FIXED: Model updated from GPT-4.1 to GPT-4.1 for superior instruction-following and structured output",
+      "FIXED: Dashboard webhook path now has its own DB query nodes (Dash \u2013 Query Meetings, Dash \u2013 Query Participants)",
+      "FIXED: Dashboard works independently \u2014 loads data directly from PostgreSQL, no need for main flow to have run first",
+      "FIXED: Dead reference to non-existent 'Compute Time Window' node replaced with 'Resolve Inputs & Defaults'",
+      "FIXED: Build Dashboard HTML uses try/catch fallback for all $() references \u2014 crash-proof on any trigger path",
+      "FIXED: Build Weekly Report references fixed for renamed node",
+      "CHANGED: Dashboard no longer branches from Build Weekly Report \u2014 it is a fully independent GET endpoint",
+      "CHANGED: Dashboard queries last 14 days of data (not just last 3 hours) for richer historical view",
+      "ARCHITECTURE: Two fully independent paths now: (1) Analysis flow: triggers \u2192 Calendar \u2192 Fathom \u2192 AI \u2192 DB \u2192 Email, (2) Dashboard flow: GET webhook \u2192 Query DB \u2192 Build HTML \u2192 Serve"
+    ]
+  }
+}
