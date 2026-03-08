@@ -116,6 +116,30 @@ function newPage(pdf) {
   return MARGIN;
 }
 
+const FOOTER_LOGO_H = 10;
+const FOOTER_LOGO_W = 14;
+const FOOTER_GAP = 2.5;
+const FOOTER_TEXT_Y = A4_H - 6;
+const FOOTER_LOGO_Y = FOOTER_TEXT_Y - FOOTER_GAP - FOOTER_LOGO_H;
+
+async function loadLogoDataUrl() {
+  try {
+    const response = await fetch('/ohrm_logo.png');
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+    const format = blob.type === 'image/png' ? 'PNG' : 'JPEG';
+    return { dataUrl, format };
+  } catch {
+    return null;
+  }
+}
+
 function placeImage(pdf, imgData, imgW, imgH, cursor) {
   const remaining = PAGE_H - (cursor - MARGIN);
 
@@ -203,13 +227,18 @@ export default function ReportGenerator({ data, onStart, onComplete, onProgress 
       }
 
       const pageCount = pdf.internal.getNumberOfPages();
+      const logo = await loadLogoDataUrl();
       for (let p = 1; p <= pageCount; p++) {
         pdf.setPage(p);
+        if (logo) {
+          const logoX = (A4_W - FOOTER_LOGO_W) / 2;
+          pdf.addImage(logo.dataUrl, logo.format, logoX, FOOTER_LOGO_Y, FOOTER_LOGO_W, FOOTER_LOGO_H);
+        }
         pdf.setFontSize(8);
         pdf.setTextColor(140, 140, 140);
         pdf.text(
           `Page ${p} of ${pageCount}  ·  Meeting Intelligence Report  ·  OrangeHRM`,
-          A4_W / 2, A4_H - 5,
+          A4_W / 2, FOOTER_TEXT_Y,
           { align: 'center' }
         );
       }

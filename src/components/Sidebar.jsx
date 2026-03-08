@@ -11,7 +11,7 @@ export default function Sidebar({ activeNav, onNav, data }) {
   ];
 
   const mgmtItems = [
-    { key: 'calendar', icon: '📅', label: 'Calendar' },
+    { key: 'calendar', icon: '🗓️', label: 'Fathom Calendar' },
     { key: 'actions', icon: '🎯', label: 'Action Items', badge: actionCount > 0 ? actionCount : null },
     { key: 'unresolved', icon: '🚨', label: 'Unresolved', badge: unresolvedCount > 0 ? unresolvedCount : null },
   ];

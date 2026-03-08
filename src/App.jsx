@@ -6,6 +6,11 @@ import Dashboard from './components/Dashboard';
 import TeamInsights from './components/TeamInsights';
 import MeetingSummary from './components/MeetingSummary';
 import Scenarios from './components/Scenarios';
+import Scenario1 from './components/Scenario1';
+import Scenario2 from './components/Scenario2';
+import Scenario3 from './components/Scenario3';
+import Scenario4 from './components/Scenario4';
+import FathomCalendar from './components/FathomCalendar';
 import EmptyState from './components/EmptyState';
 import ReportGenerator from './components/ReportGenerator';
 
@@ -20,6 +25,7 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [activeNav, setActiveNav] = useState('dashboard');
+  const [selectedScenario, setSelectedScenario] = useState(null);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [reportProgress, setReportProgress] = useState({ pct: 0, section: '' });
   const [viewDateFrom, setViewDateFrom] = useState(null);
@@ -27,6 +33,10 @@ export default function App() {
   const pollRef = useRef(null);
   const countdownRef = useRef(null);
   const lastUpdateRef = useRef(null);
+  const pendingDateRef = useRef(null);
+
+  const isRunningRef = useRef(false);
+  isRunningRef.current = isRunning;
 
   const fetchDashboard = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -44,9 +54,14 @@ export default function App() {
       if (json.summary?.dateFrom != null) setViewDateFrom(json.summary.dateFrom);
       if (json.summary?.dateTo != null) setViewDateTo(json.summary.dateTo);
 
-      if (lastUpdateRef.current && json.summary?.lastUpdated !== lastUpdateRef.current && isRunning) {
+      if (lastUpdateRef.current && json.summary?.lastUpdated !== lastUpdateRef.current && isRunningRef.current) {
         setIsRunning(false);
         stopPolling();
+        if (pendingDateRef.current) {
+          setViewDateFrom(pendingDateRef.current.from);
+          setViewDateTo(pendingDateRef.current.to);
+          pendingDateRef.current = null;
+        }
       }
       lastUpdateRef.current = json.summary?.lastUpdated;
     } catch (err) {
@@ -54,7 +69,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [isRunning]);
+  }, []);
 
   const checkHealth = useCallback(async () => {
     try {
@@ -93,8 +108,7 @@ export default function App() {
       if (!res.ok) throw new Error(json.detail || json.error || 'Trigger failed');
 
       if (!payload.useDefaults && payload.dateFrom && payload.dateTo) {
-        setViewDateFrom(payload.dateFrom);
-        setViewDateTo(payload.dateTo);
+        pendingDateRef.current = { from: payload.dateFrom, to: payload.dateTo };
       }
       setIsRunning(true);
       setCountdown(120);
@@ -139,6 +153,7 @@ export default function App() {
       }, 300);
       return;
     }
+    setSelectedScenario(null);
     setActiveNav(key);
   }, [hasData]);
 
@@ -168,8 +183,16 @@ export default function App() {
             <TriggerPanel onTrigger={handleTrigger} isRunning={isRunning} />
           )}
 
-          {activeNav === 'scenarios' ? (
-            <Scenarios />
+          {activeNav === 'scenarios' && selectedScenario === 1 ? (
+            <Scenario1 onBack={() => setSelectedScenario(null)} />
+          ) : activeNav === 'scenarios' && selectedScenario === 2 ? (
+            <Scenario2 onBack={() => setSelectedScenario(null)} />
+          ) : activeNav === 'scenarios' && selectedScenario === 3 ? (
+            <Scenario3 onBack={() => setSelectedScenario(null)} />
+          ) : activeNav === 'scenarios' && selectedScenario === 4 ? (
+            <Scenario4 onBack={() => setSelectedScenario(null)} />
+          ) : activeNav === 'scenarios' ? (
+            <Scenarios onSelectScenario={setSelectedScenario} />
           ) : loading && !data ? (
             <div className="loading-overlay">
               <div className="spinner" />
@@ -197,6 +220,8 @@ export default function App() {
               ownerInsights={data.ownerInsights}
               attendanceRecs={data.attendanceRecs}
             />
+          ) : activeNav === 'calendar' ? (
+            <FathomCalendar />
           ) : (
             <Dashboard data={data} isRunning={isRunning} />
           )}

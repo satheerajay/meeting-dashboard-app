@@ -79,7 +79,7 @@ export default function TriggerPanel({ onTrigger, isRunning }) {
     workStart: '09:00', workEnd: '17:00',
     workDays: '',
     minDuration: 0, typeFilter: '',
-    ownerEmail: localStorage.getItem('ownerEmail') || '',
+    ownerEmail: '',
   });
 
   const update = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
@@ -98,7 +98,6 @@ export default function TriggerPanel({ onTrigger, isRunning }) {
 
   async function handleRun() {
     setStatus({ type: 'loading', message: 'Starting analysis...' });
-    if (form.ownerEmail) localStorage.setItem('ownerEmail', form.ownerEmail);
     const payload = {
       dateFrom: form.dateFrom || null,
       dateTo: form.dateTo || null,
@@ -140,15 +139,6 @@ export default function TriggerPanel({ onTrigger, isRunning }) {
       </div>
 
       <div className={`trigger-body ${collapsed ? 'collapsed' : ''}`}>
-        <div className="form-grid" style={{ gridTemplateColumns: '1fr' }}>
-          <div className="form-field">
-            <label>👤 Your Email <span style={{ fontSize: 10, opacity: 0.5 }}>(for personalized insights)</span></label>
-            <input type="email" placeholder="e.g. you@orangehrm.com"
-              value={form.ownerEmail} onChange={e => update('ownerEmail', e.target.value)}
-              style={{ fontFamily: "'DM Mono', monospace", fontSize: 13 }} />
-          </div>
-        </div>
-
         <div className="form-grid">
           <div className="form-field">
             <label>📅 Date From</label>

@@ -21,14 +21,36 @@ const pool = new pg.Pool({
   password: process.env.PG_PASSWORD,
   ssl: process.env.PG_SSL === 'true' ? { rejectUnauthorized: false } : false,
   max: 10,
-  idleTimeoutMillis: 30000,
+  min: 2,
+  idleTimeoutMillis: 120000,
+  connectionTimeoutMillis: 15000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 pool.on('error', (err) => console.error('[DB] Pool error:', err.message));
 
+// Pre-warm the pool so the first request doesn't wait for connection setup
+(async () => {
+  const start = Date.now();
+  try {
+    const client = await pool.connect();
+    const elapsed = Date.now() - start;
+    console.log(`[DB] Pool pre-warmed — connected in ${elapsed}ms`);
+    client.release();
+  } catch (err) {
+    const elapsed = Date.now() - start;
+    console.error(`[DB] Pre-warm failed after ${elapsed}ms:`, err.code || err.message || err);
+  }
+})();
+
 // ── Last trigger date range (so dashboard can filter by it) ──
 let lastTriggerDateFrom = null;
 let lastTriggerDateTo = null;
+
+// ── Short-lived response cache to avoid redundant DB round-trips on refresh ──
+const dashboardCache = { key: null, data: null, ts: 0 };
+const CACHE_TTL_MS = 5000;
 
 // ── Helper: score color tier ──
 function scoreTier(score) {
@@ -58,6 +80,11 @@ app.get('/api/dashboard', async (req, res) => {
       toTs = new Date(dateTo + 'T23:59:59.999').toISOString();
     }
     const dateParams = fromTs && toTs ? [fromTs, toTs] : [];
+
+    const cacheKey = `${dateFrom || ''}|${dateTo || ''}`;
+    if (dashboardCache.key === cacheKey && (Date.now() - dashboardCache.ts) < CACHE_TTL_MS) {
+      return res.json(dashboardCache.data);
+    }
 
     const meetingsQuery = `
       SELECT meeting_id, summary, start_time, end_time, duration_minutes,
@@ -550,7 +577,7 @@ app.get('/api/dashboard', async (req, res) => {
       weekLabel = `${fmt(start)} – ${fmt(end)}`;
     }
 
-    res.json({
+    const responseData = {
       summary: {
         totalMeetings,
         totalHours,
@@ -612,10 +639,16 @@ app.get('/api/dashboard', async (req, res) => {
         meetingValueForOwner: parseFloat(m.meeting_value_for_owner) || 50,
         couldBeReplacedWith: m.could_be_replaced_with || 'nothing',
       })),
-    });
+    };
+
+    dashboardCache.key = cacheKey;
+    dashboardCache.data = responseData;
+    dashboardCache.ts = Date.now();
+
+    res.json(responseData);
   } catch (err) {
-    console.error('[API] Dashboard error:', err.message);
-    res.status(500).json({ error: 'Failed to load dashboard data', detail: err.message });
+    console.error('[API] Dashboard error:', err.code || '', err.message || err);
+    res.status(500).json({ error: 'Failed to load dashboard data', detail: err.message || String(err) });
   }
 });
 
@@ -623,11 +656,10 @@ app.get('/api/dashboard', async (req, res) => {
 app.post('/api/trigger', async (req, res) => {
   const webhookUrl = `${process.env.N8N_WEBHOOK_BASE}${process.env.N8N_TRIGGER_PATH}`;
   const payload = req.body || {};
+  console.log('[TRIGGER] Payload →', JSON.stringify(payload));
+  console.log('[TRIGGER] Webhook URL →', webhookUrl);
 
-  if (!payload.useDefaults && payload.dateFrom && payload.dateTo) {
-    lastTriggerDateFrom = payload.dateFrom;
-    lastTriggerDateTo = payload.dateTo;
-  }
+  dashboardCache.ts = 0;
 
   try {
     const controller = new AbortController();
@@ -679,7 +711,11 @@ if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
 }
 
-app.listen(PORT, () => {
-  console.log(`\n  🍊 Meeting Dashboard API running on http://localhost:${PORT}`);
-  console.log(`  📊 Dashboard UI: http://localhost:5173 (dev) or http://localhost:${PORT} (prod)\n`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`\n  🍊 Meeting Dashboard API running on http://localhost:${PORT}`);
+    console.log(`  📊 Dashboard UI: http://localhost:5173 (dev) or http://localhost:${PORT} (prod)\n`);
+  });
+}
+
+export default app;
